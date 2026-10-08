@@ -12,7 +12,6 @@ import logging
 from dataclasses import dataclass
 
 from .library_index import LibraryIndex
-from .matching import best_match
 from .spotify_client import SpotifyClient
 
 logger = logging.getLogger("spotify_queuer.queue_engine")
@@ -72,10 +71,10 @@ def filter_not_local(
     fuzzy comparisons) -- costs zero extra Spotify requests."""
     if on_progress is not None:
         on_progress(f"Checking {len(tracks)} track(s) against your local library...")
-    local_tracks = library.tracks()
+    index = library.match_index()
     kept = []
     for track in tracks:
-        candidate, _ = best_match(track.title, track.artists, local_tracks, threshold=threshold)
+        candidate, _ = index.best(track.title, track.artists, threshold=threshold)
         if candidate is None:
             kept.append(track)
     return kept

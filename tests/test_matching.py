@@ -61,3 +61,35 @@ def test_best_match_returns_none_when_no_candidate_clears_threshold():
     best, result = matching.best_match("Latch", "Disclosure, Sam Smith", candidates, threshold=87)
     assert best is None
     assert result is None
+
+
+def test_match_index_agrees_with_brute_force_scoring():
+    import random
+
+    class Candidate:
+        def __init__(self, title, artists):
+            self.title = title
+            self.artists = artists
+
+    words = ["latch", "white", "noise", "omen", "you", "me", "help", "remix", "edit", "radio", "the", "love"]
+    artists = ["Disclosure", "Sam Smith", "AlunaGeorge", "Eliza Doolittle", "Flume", "Kai"]
+    rng = random.Random(1)
+
+    def random_track():
+        title = " ".join(rng.choice(words) for _ in range(rng.randint(1, 3)))
+        return title, ", ".join(rng.sample(artists, rng.randint(1, 2)))
+
+    candidates = [Candidate(*random_track()) for _ in range(300)]
+    index = matching.MatchIndex(candidates)
+    for _ in range(100):
+        title, artist_str = random_track()
+        for threshold in (60, 87, 95):
+            expected_best, expected_score = None, None
+            for c in candidates:
+                r = matching.score_match(title, artist_str, c.title, c.artists, threshold=threshold)
+                if r.is_match and (expected_score is None or r.score > expected_score):
+                    expected_best, expected_score = c, r.score
+            best, result = index.best(title, artist_str, threshold=threshold)
+            assert best is expected_best
+            if expected_best is not None:
+                assert abs(result.score - expected_score) < 1e-9

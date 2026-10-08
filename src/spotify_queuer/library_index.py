@@ -4,13 +4,25 @@ Expects the single configured music root laid out as
 {Artist}/{Album}/{Title} - {Artists}.{ext}, scanned recursively.
 
 Scanned on demand (rescan() is called right before a "skip local tracks"
-check in queue_engine.py), not watched independently.
+check in queue_engine.py), not watched independently. Rescans are
+incremental: given a db_path, every known file is persisted in SQLite with
+its size and mtime, so a rescan only lists directories and re-parses the
+files that are new or changed since the last scan (including the last app
+run), and the fuzzy-match index is only rebuilt when something actually
+changed.
 """
 from __future__ import annotations
 
+import logging
+import os
+import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from .matching import MatchIndex
+
+logger = logging.getLogger("spotify_queuer.library_index")
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".aac", ".wma"}
 
@@ -48,34 +60,154 @@ def parse_track_file(path: Path, music_root: Path) -> LocalTrack | None:
     )
 
 
+def _walk_audio_files(root: Path):
+    """Yield (path_str, size, mtime) for every audio file under root.
+
+    os.scandir rather than Path.rglob + stat: on Windows the directory
+    listing already carries size/mtime, so this costs one listing per folder
+    instead of an extra stat call per file.
+    """
+    stack = [str(root)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif os.path.splitext(entry.name)[1].lower() in AUDIO_EXTENSIONS and entry.is_file():
+                            st = entry.stat()
+                            yield entry.path, st.st_size, st.st_mtime
+                    except OSError:
+                        continue  # vanished or unreadable mid-scan; the next rescan will pick it up
+        except OSError:
+            logger.warning("Could not list folder during library scan: %s", current)
+
+
 def scan_music_root(music_root: Path | str) -> list[LocalTrack]:
     music_root = Path(music_root)
     if not music_root.exists():
         return []
     tracks = []
-    for path in music_root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
-            track = parse_track_file(path, music_root)
-            if track is not None:
-                tracks.append(track)
+    for path_str, _size, _mtime in _walk_audio_files(music_root):
+        track = parse_track_file(Path(path_str), music_root)
+        if track is not None:
+            tracks.append(track)
     return tracks
 
 
-class LibraryIndex:
-    """In-memory index of local tracks, refreshed by an explicit rescan()
-    call rather than watching the filesystem itself."""
+class _LibraryDB:
+    """Persisted (path, size, mtime) -> parsed track rows."""
 
-    def __init__(self, music_root: Path | str):
+    def __init__(self, db_path: Path | str):
+        db_path = Path(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_tracks (
+                path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                artist TEXT NOT NULL,
+                album TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artists TEXT NOT NULL
+            )
+            """
+        )
+        self._conn.commit()
+
+    def load(self) -> dict[str, tuple[int, float, LocalTrack | None]]:
+        rows = self._conn.execute(
+            "SELECT path, size, mtime, artist, album, title, artists FROM library_tracks"
+        ).fetchall()
+        return {
+            path: (size, mtime, LocalTrack(Path(path), artist, album, title, artists))
+            for path, size, mtime, artist, album, title, artists in rows
+        }
+
+    def apply_changes(self, upserts: list[tuple[str, int, float, LocalTrack]], deleted: list[str]) -> None:
+        with self._conn:
+            self._conn.executemany("DELETE FROM library_tracks WHERE path = ?", [(p,) for p in deleted])
+            self._conn.executemany(
+                """
+                INSERT INTO library_tracks (path, size, mtime, artist, album, title, artists)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    size = excluded.size, mtime = excluded.mtime, artist = excluded.artist,
+                    album = excluded.album, title = excluded.title, artists = excluded.artists
+                """,
+                [(p, size, mtime, t.artist, t.album, t.title, t.artists) for p, size, mtime, t in upserts],
+            )
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class LibraryIndex:
+    """Index of local tracks, refreshed by an explicit rescan() call rather
+    than watching the filesystem itself. Optionally backed by SQLite
+    (db_path) so the index survives restarts and rescans are incremental."""
+
+    def __init__(self, music_root: Path | str, db_path: Path | str | None = None):
         self.music_root = Path(music_root)
         self._lock = threading.Lock()
-        self._tracks: list[LocalTrack] = []
+        self._db = _LibraryDB(db_path) if db_path is not None else None
+        # path -> (size, mtime, track); track is None for audio files outside
+        # the {Artist}/{Album}/ layout, remembered so they aren't re-parsed every scan.
+        self._entries: dict[str, tuple[int, float, LocalTrack | None]] = self._db.load() if self._db else {}
+        self._match_index: MatchIndex | None = None
 
     def rescan(self) -> list[LocalTrack]:
-        tracks = scan_music_root(self.music_root)
+        if not self.music_root.exists():
+            found = {}
+        else:
+            found = {path: (size, mtime) for path, size, mtime in _walk_audio_files(self.music_root)}
+
         with self._lock:
-            self._tracks = tracks
-        return tracks
+            old = self._entries
+            new_entries: dict[str, tuple[int, float, LocalTrack | None]] = {}
+            upserts = []
+            for path, (size, mtime) in found.items():
+                previous = old.get(path)
+                if previous is not None and previous[0] == size and previous[1] == mtime:
+                    new_entries[path] = previous
+                    continue
+                track = parse_track_file(Path(path), self.music_root)
+                new_entries[path] = (size, mtime, track)
+                if track is not None:
+                    upserts.append((path, size, mtime, track))
+            deleted = [path for path in old if path not in new_entries]
+            # Files that didn't parse as tracks were never persisted, so only real tracks need deleting.
+            deleted_in_db = [path for path in deleted if old[path][2] is not None]
+
+            self._entries = new_entries
+            if upserts or deleted_in_db:
+                self._match_index = None
+                if self._db is not None:
+                    self._db.apply_changes(upserts, deleted_in_db)
+            logger.info(
+                "Library scan: %d file(s), %d new/changed, %d removed", len(new_entries), len(upserts), len(deleted)
+            )
+            return self._tracks_locked()
 
     def tracks(self) -> list[LocalTrack]:
         with self._lock:
-            return list(self._tracks)
+            return self._tracks_locked()
+
+    def match_index(self) -> MatchIndex:
+        """Fuzzy-match index over the current tracks, cached until a rescan changes something."""
+        with self._lock:
+            if self._match_index is None:
+                self._match_index = MatchIndex(self._tracks_locked())
+            return self._match_index
+
+    def close(self) -> None:
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
+    def _tracks_locked(self) -> list[LocalTrack]:
+        return [entry[2] for entry in self._entries.values() if entry[2] is not None]

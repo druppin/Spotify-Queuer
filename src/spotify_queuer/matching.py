@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz, process
 
 _ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|&|/|;|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\band\b)\s*", re.IGNORECASE)
 _NORMALIZE_STRIP_RE = re.compile(r"[^\w\s]", re.UNICODE)
@@ -83,6 +83,65 @@ def score_match(
     return MatchResult(score=combined, title_score=t_score, artist_score=a_score, is_match=combined >= threshold)
 
 
+def _min_title_score(threshold: float) -> float:
+    """Lowest title score that could still reach `threshold` given a perfect
+    artist score -- anything below it can be discarded without scoring artists."""
+    # Small epsilon so float rounding never drops a pairing that would land exactly on the threshold.
+    return max(0.0, (threshold - ARTIST_WEIGHT * 100.0) / TITLE_WEIGHT - 1e-6)
+
+
+def _sort_tokens(text: str) -> str:
+    return " ".join(sorted(text.split()))
+
+
+class MatchIndex:
+    """Candidates normalized once up front, so matching many queries against
+    the same (large) local library doesn't redo the regex normalization for
+    every pairing. Titles are compared in one batched rapidfuzz call per query
+    (C++, with a cutoff that discards hopeless candidates before the Python-
+    level artist scoring runs), giving the same results as scoring every
+    pairing with score_match()."""
+
+    def __init__(self, candidates, title_attr: str = "title", artists_attr: str = "artists"):
+        self._candidates = list(candidates)
+        # Words pre-sorted so the per-query comparison can use plain fuzz.ratio:
+        # ratio(sorted(a), sorted(b)) is exactly token_sort_ratio(a, b), minus
+        # re-sorting every candidate's words on every query.
+        self._sorted_titles = [_sort_tokens(normalize_text(getattr(c, title_attr))) for c in self._candidates]
+        self._artist_lists = [split_artists(getattr(c, artists_attr)) for c in self._candidates]
+
+    def __len__(self) -> int:
+        return len(self._candidates)
+
+    def best(self, title: str, artists: str | list[str], threshold: int = DEFAULT_THRESHOLD):
+        """Return (candidate, MatchResult) for the best candidate scoring >= threshold, or (None, None).
+        Ties go to the earliest candidate, as with best_match()."""
+        if not self._candidates:
+            return None, None
+        hits = process.extract(
+            _sort_tokens(normalize_text(title)),
+            self._sorted_titles,
+            scorer=fuzz.ratio,
+            processor=None,
+            score_cutoff=_min_title_score(threshold),
+            limit=None,
+        )
+        if not hits:
+            return None, None
+        query_artists = split_artists(artists)
+        best_index = -1
+        best_result: MatchResult | None = None
+        for _, t_score, index in sorted(hits, key=lambda hit: hit[2]):
+            a_score = artist_overlap_score(query_artists, self._artist_lists[index])
+            combined = TITLE_WEIGHT * t_score + ARTIST_WEIGHT * a_score
+            if combined >= threshold and (best_result is None or combined > best_result.score):
+                best_index = index
+                best_result = MatchResult(score=combined, title_score=t_score, artist_score=a_score, is_match=True)
+        if best_result is None:
+            return None, None
+        return self._candidates[best_index], best_result
+
+
 def best_match(
     title: str,
     artists: str | list[str],
@@ -94,14 +153,7 @@ def best_match(
     """Return (candidate, MatchResult) for the best candidate scoring >= threshold, or (None, None).
 
     `candidates` is any iterable of objects exposing `candidate_title_attr` and
-    `candidate_artists_attr`.
+    `candidate_artists_attr`. When matching many queries against the same
+    candidates, build one MatchIndex and reuse it instead.
     """
-    best_candidate = None
-    best_result: MatchResult | None = None
-    for candidate in candidates:
-        cand_title = getattr(candidate, candidate_title_attr)
-        cand_artists = getattr(candidate, candidate_artists_attr)
-        result = score_match(title, artists, cand_title, cand_artists, threshold=threshold)
-        if result.score >= threshold and (best_result is None or result.score > best_result.score):
-            best_candidate, best_result = candidate, result
-    return best_candidate, best_result
+    return MatchIndex(candidates, candidate_title_attr, candidate_artists_attr).best(title, artists, threshold)
