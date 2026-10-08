@@ -1,0 +1,29 @@
+{
+  "spotify": {
+    "client_id": "",
+    "client_secret": "",
+    "device_name": "DESKTOP-PC"
+  },
+  "queue": {
+    "last_selected_playlist_ids": [],
+    "skip_local_tracks": true,
+    "interrupt_playback": true
+  },
+  "rate_limit": {
+    "max_requests": 90,
+    "window_seconds": 30
+  },
+  "download_watch": {
+    "watch_dir": "D:\\Downloads\\Music",
+    "enabled": true,
+    "fallback_rescan_seconds": 60
+  },
+  "paths": {
+    "music_root": "D:\\Music",
+    "m3u_output_dir": "D:\\Music\\_Playlists",
+    "log_dir": "D:\\Music\\_Logs"
+  },
+  "matching": {
+    "fuzzy_threshold": 87
+  }
+}

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.spec.bak
+config.json
+.spotify_token_cache
+spotify_queuer_state.sqlite3
+_cache/
+*.egg-info/
