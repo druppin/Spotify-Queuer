@@ -61,3 +61,75 @@ def test_match_index_is_cached_until_library_changes(tmp_path):
     rebuilt = index.match_index()
     assert rebuilt is not first
     assert len(rebuilt) == 2
+
+
+def _tagged_mp3(root, rel, title, artists):
+    from mutagen.easyid3 import EasyID3
+
+    path = _touch(root, rel, (b"\xff\xfb\x90\x64" + b"\x00" * 413) * 10)  # a few silent MPEG frames
+    tags = EasyID3()
+    tags["title"] = title
+    tags["artist"] = artists
+    tags.save(path)
+    return path
+
+
+def test_rescan_reads_title_and_artist_tags(tmp_path):
+    _tagged_mp3(tmp_path, "Artist/Album/Song (Old Name).mp3", "Song - Extended Mix", ["Artist 1", "Artist 2"])
+
+    [track] = LibraryIndex(tmp_path).rescan()
+
+    assert (track.tag_title, track.tag_artists) == ("Song - Extended Mix", "Artist 1; Artist 2")
+
+
+def test_match_index_matches_on_tags_when_filename_does_not(tmp_path):
+    # Filename lost the " - Remix" suffix and names only the first artist; the tags are right.
+    _tagged_mp3(
+        tmp_path,
+        "The Bloody Beetroots/Warp 1.9 [Remix]/Warp 1.9 (feat. Steve Aoki).mp3",
+        "Warp 1.9 (feat. Steve Aoki) - longstoryshort Remix",
+        ["The Bloody Beetroots", "Steve Aoki", "longstoryshort"],
+    )
+    index = LibraryIndex(tmp_path)
+    index.rescan()
+
+    candidate, _ = index.match_index().best(
+        "Warp 1.9 (feat. Steve Aoki) - longstoryshort Remix", ["The Bloody Beetroots", "Steve Aoki", "longstoryshort"]
+    )
+
+    assert candidate is not None
+
+
+def test_match_index_matches_untagged_title_containing_dash(tmp_path):
+    _touch(tmp_path, "Artist 1/Song (2024)/Song - Extended Mix.mp3")
+    index = LibraryIndex(tmp_path)
+    index.rescan()
+
+    candidate, _ = index.match_index().best("Song - Extended Mix", ["Artist 1"])
+
+    assert candidate is not None
+
+
+def test_rows_from_before_tags_were_indexed_are_reread(tmp_path):
+    import sqlite3
+
+    music, db = tmp_path / "music", tmp_path / "lib.sqlite3"
+    path = _tagged_mp3(music, "Artist/Album/Song.mp3", "Song - Extended Mix", ["Artist 1"])
+    stat = path.stat()
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE library_tracks (path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime REAL NOT NULL, "
+        "artist TEXT NOT NULL, album TEXT NOT NULL, title TEXT NOT NULL, artists TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO library_tracks VALUES (?, ?, ?, 'Artist', 'Album', 'Song', 'Artist')",
+        (str(path), stat.st_size, stat.st_mtime),
+    )
+    conn.commit()
+    conn.close()
+
+    index = LibraryIndex(music, db_path=db)
+    [track] = index.rescan()
+    index.close()
+
+    assert track.tag_title == "Song - Extended Mix"

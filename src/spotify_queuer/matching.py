@@ -100,15 +100,28 @@ class MatchIndex:
     every pairing. Titles are compared in one batched rapidfuzz call per query
     (C++, with a cutoff that discards hopeless candidates before the Python-
     level artist scoring runs), giving the same results as scoring every
-    pairing with score_match()."""
+    pairing with score_match().
 
-    def __init__(self, candidates, title_attr: str = "title", artists_attr: str = "artists"):
+    `keys`, if given, maps a candidate to several (title, artists) pairs
+    (e.g. one from the filename and one from its tags); a candidate's score
+    is its best-scoring key. Otherwise each candidate has the single key
+    (title_attr, artists_attr)."""
+
+    def __init__(self, candidates, title_attr: str = "title", artists_attr: str = "artists", keys=None):
         self._candidates = list(candidates)
+        if keys is None:
+            keys = lambda c: [(getattr(c, title_attr), getattr(c, artists_attr))]  # noqa: E731
         # Words pre-sorted so the per-query comparison can use plain fuzz.ratio:
         # ratio(sorted(a), sorted(b)) is exactly token_sort_ratio(a, b), minus
         # re-sorting every candidate's words on every query.
-        self._sorted_titles = [_sort_tokens(normalize_text(getattr(c, title_attr))) for c in self._candidates]
-        self._artist_lists = [split_artists(getattr(c, artists_attr)) for c in self._candidates]
+        self._sorted_titles: list[str] = []
+        self._artist_lists: list[list[str]] = []
+        self._owners: list[int] = []  # key position -> candidate position
+        for owner, candidate in enumerate(self._candidates):
+            for title, artists in keys(candidate):
+                self._sorted_titles.append(_sort_tokens(normalize_text(title)))
+                self._artist_lists.append(split_artists(artists))
+                self._owners.append(owner)
 
     def __len__(self) -> int:
         return len(self._candidates)
@@ -129,17 +142,17 @@ class MatchIndex:
         if not hits:
             return None, None
         query_artists = split_artists(artists)
-        best_index = -1
+        best_owner = -1
         best_result: MatchResult | None = None
         for _, t_score, index in sorted(hits, key=lambda hit: hit[2]):
             a_score = artist_overlap_score(query_artists, self._artist_lists[index])
             combined = TITLE_WEIGHT * t_score + ARTIST_WEIGHT * a_score
             if combined >= threshold and (best_result is None or combined > best_result.score):
-                best_index = index
+                best_owner = self._owners[index]
                 best_result = MatchResult(score=combined, title_score=t_score, artist_score=a_score, is_match=True)
         if best_result is None:
             return None, None
-        return self._candidates[best_index], best_result
+        return self._candidates[best_owner], best_result
 
 
 def best_match(
