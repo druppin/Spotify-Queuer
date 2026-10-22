@@ -1,6 +1,7 @@
 import pytest
 
 from spotify_queuer.library_index import LibraryIndex
+from spotify_queuer.matching import MatchIndex
 from spotify_queuer.queue_engine import (
     DeviceNotFoundError,
     collect_playlist_tracks,
@@ -178,7 +179,7 @@ def test_run_queue_end_to_end(tmp_path):
 
 
 def _queue_setup(tmp_path):
-    from spotify_queuer.queue_history import QueueHistory
+    from spotify_queuer.catalog import Catalog
 
     spotify = FakeSpotify()
     spotify.devices = [{"id": "dev1", "name": "My PC"}]
@@ -186,31 +187,79 @@ def _queue_setup(tmp_path):
         "p1": [make_track("a", "Song A", ["Artist 1"]), make_track("b", "Song B", ["Artist 2"])],
         "p2": [make_track("b", "Song B", ["Artist 2"]), make_track("c", "Song C", ["Artist 3"])],
     }
-    library = LibraryIndex(tmp_path / "music")
-    history = QueueHistory(tmp_path / "history.sqlite3")
-    return spotify, library, history
+    db = tmp_path / "app.sqlite3"
+    library = LibraryIndex(tmp_path / "music", db_path=db)
+    catalog = Catalog(db)
+    catalog.sync_playlists([{"id": "p1", "name": "Mix One"}, {"id": "p2", "name": "Mix Two"}])
+    return spotify, library, catalog
 
 
-def _run(spotify, library, history, playlist_ids, **kwargs):
+def _run(spotify, library, catalog, playlist_ids, snapshots=None):
     return run_queue(
         spotify, library, "My PC", playlist_ids, skip_local=True, interrupt_playback=True, fuzzy_threshold=87,
-        history=history, playlist_names={"p1": "Mix One", "p2": "Mix Two"}, **kwargs,
+        catalog=catalog, snapshots=snapshots,
     )
 
 
 def test_run_queue_queues_track_on_two_playlists_once(tmp_path):
-    spotify, library, history = _queue_setup(tmp_path)
-    result = _run(spotify, library, history, ["p1", "p2"])
+    spotify, library, catalog = _queue_setup(tmp_path)
+    result = _run(spotify, library, catalog, ["p1", "p2"])
     assert spotify.started_playback == ("dev1", ["spotify:track:a", "spotify:track:b", "spotify:track:c"])
     assert result.skipped_duplicate == 1
-    row = history._conn.execute("SELECT playlist_name FROM queued_tracks WHERE uri = 'spotify:track:b'").fetchone()
-    assert row == ("Mix One",)  # first playlist in queue order wins
+    row = catalog._conn.execute("SELECT playlist_id FROM queue_events WHERE track_id = 'b'").fetchone()
+    assert row == ("p1",)  # first playlist in queue order wins
 
 
 def test_run_queue_requeues_tracks_an_earlier_run_sent_but_never_downloaded(tmp_path):
     # Spotify's queue is volatile (replaced by the next start_playback, dropped
     # when the session ends), so an earlier run's tracks must not be skipped.
-    spotify, library, history = _queue_setup(tmp_path)
-    _run(spotify, library, history, ["p1"])
-    result = _run(spotify, library, history, ["p1"])
+    spotify, library, catalog = _queue_setup(tmp_path)
+    _run(spotify, library, catalog, ["p1"])
+    result = _run(spotify, library, catalog, ["p1"])
     assert result.queued == 2
+
+
+def test_run_queue_reads_unchanged_playlists_from_the_database(tmp_path):
+    spotify, library, catalog = _queue_setup(tmp_path)
+    fetches = []
+    original = spotify.get_playlist_tracks
+    spotify.get_playlist_tracks = lambda pid: fetches.append(pid) or original(pid)
+
+    _run(spotify, library, catalog, ["p1", "p2"], snapshots={"p1": "s1", "p2": "s1"})
+    result = _run(spotify, library, catalog, ["p1", "p2"], snapshots={"p1": "s1", "p2": "s2"})
+
+    assert fetches == ["p1", "p2", "p2"]  # p1 unchanged on the second run, p2's snapshot moved
+    assert result.cached_playlists == 1
+    assert spotify.started_playback == ("dev1", ["spotify:track:a", "spotify:track:b", "spotify:track:c"])
+
+
+def test_run_queue_without_snapshot_always_fetches(tmp_path):
+    spotify, library, catalog = _queue_setup(tmp_path)
+    _run(spotify, library, catalog, ["p1"])
+    assert _run(spotify, library, catalog, ["p1"]).cached_playlists == 0
+
+
+def test_run_queue_links_local_matches_and_trusts_the_link_next_time(tmp_path):
+    spotify, library, catalog = _queue_setup(tmp_path)
+    song = tmp_path / "music" / "Artist 1" / "Album" / "Song A - Artist 1.mp3"
+    song.parent.mkdir(parents=True)
+    song.write_bytes(b"x")
+
+    first = _run(spotify, library, catalog, ["p1"])
+    assert first.skipped_local == 1
+    assert catalog.linked_uris(["spotify:track:a"]) == {"spotify:track:a"}
+
+    library._match_index = MatchIndex([])  # no fuzzy candidates: only the stored link can skip "a"
+    assert _run(spotify, library, catalog, ["p1"]).skipped_local == 1
+
+
+def test_deleted_file_drops_its_link_on_rescan(tmp_path):
+    spotify, library, catalog = _queue_setup(tmp_path)
+    song = tmp_path / "music" / "Artist 1" / "Album" / "Song A - Artist 1.mp3"
+    song.parent.mkdir(parents=True)
+    song.write_bytes(b"x")
+    _run(spotify, library, catalog, ["p1"])
+
+    song.unlink()
+    library.rescan()
+    assert catalog.linked_uris(["spotify:track:a"]) == set()

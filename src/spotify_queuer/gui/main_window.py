@@ -66,13 +66,10 @@ class _QueueWorker(QObject):
     finished = Signal(object)  # QueueResult
     failed = Signal(str)
 
-    def __init__(
-        self, app: Application, playlist_ids: list[str], interrupt_override: bool | None, playlist_names: dict[str, str]
-    ):
+    def __init__(self, app: Application, playlist_ids: list[str], interrupt_override: bool | None):
         super().__init__()
         self._app = app
         self._playlist_ids = playlist_ids
-        self._playlist_names = playlist_names
         self._interrupt_override = interrupt_override
 
     def run(self) -> None:
@@ -81,7 +78,6 @@ class _QueueWorker(QObject):
                 self._playlist_ids,
                 interrupt_playback=self._interrupt_override,
                 on_progress=self.progress.emit,
-                playlist_names=self._playlist_names,
             )
         except DeviceNotFoundError as exc:
             self.failed.emit(str(exc))
@@ -338,11 +334,7 @@ class MainWindow(QMainWindow):
         progress.show()
 
         thread = QThread(self)
-        names = {
-            self._queue_order_list.item(i).data(Qt.UserRole): self._queue_order_list.item(i).text()
-            for i in range(self._queue_order_list.count())
-        }
-        worker = _QueueWorker(self._app, playlist_ids, interrupt_override, names)
+        worker = _QueueWorker(self._app, playlist_ids, interrupt_override)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         # Worker signals must go to methods of a GUI-thread QObject (self /

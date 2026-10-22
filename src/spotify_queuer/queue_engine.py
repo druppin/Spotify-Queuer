@@ -11,8 +11,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .catalog import Catalog
 from .library_index import LibraryIndex
-from .queue_history import QueueHistory
 from .spotify_client import SpotifyClient
 
 logger = logging.getLogger("spotify_queuer.queue_engine")
@@ -32,6 +32,7 @@ class QueueResult:
     skipped_local: int
     queued: int
     skipped_duplicate: int = 0  # same track on more than one selected playlist
+    cached_playlists: int = 0  # read from the database: snapshot unchanged, no Spotify request
 
 
 class DeviceNotFoundError(RuntimeError):
@@ -46,40 +47,58 @@ def _track_from_raw(raw: dict, playlist_id: str = "") -> QueuedTrack | None:
 
 
 def collect_playlist_tracks(
-    spotify: SpotifyClient, playlist_ids: list[str], on_progress=None
+    spotify: SpotifyClient,
+    playlist_ids: list[str],
+    on_progress=None,
+    catalog: Catalog | None = None,
+    snapshots: dict[str, str] | None = None,
 ) -> list[QueuedTrack]:
-    """Fetch and concatenate tracks for each playlist ID, in the given order.
+    """Tracks for each playlist ID, concatenated in the given order.
 
-    One playlist-items fetch per playlist -- required regardless, since
-    queuing needs the actual track URIs. on_progress(message), if given, is
-    called before each playlist's fetch so a caller can show live status
-    during what can be a slow, rate-limited series of requests.
+    With a catalog, a playlist whose current snapshot_id (from `snapshots`,
+    as listed by Spotify) matches the stored one is read from the database
+    at no request cost; otherwise its items are fetched (one request per 100
+    tracks) and stored. on_progress(message), if given, is called before
+    each playlist so a caller can show live status during what can be a
+    slow, rate-limited series of requests.
     """
+    snapshots = snapshots or {}
     tracks: list[QueuedTrack] = []
     for i, playlist_id in enumerate(playlist_ids, start=1):
+        snapshot_id = snapshots.get(playlist_id)
+        if catalog is not None and catalog.is_current(playlist_id, snapshot_id):
+            tracks.extend(QueuedTrack(*row, playlist_id=playlist_id) for row in catalog.cached_tracks(playlist_id))
+            continue
         if on_progress is not None:
             on_progress(f"Fetching tracks for playlist {i}/{len(playlist_ids)}...")
-        for raw in spotify.get_playlist_tracks(playlist_id):
-            track = _track_from_raw(raw, playlist_id)
-            if track is not None:
-                tracks.append(track)
+        fetched = [t for t in (_track_from_raw(raw, playlist_id) for raw in spotify.get_playlist_tracks(playlist_id)) if t]
+        if catalog is not None:
+            catalog.store_playlist(playlist_id, snapshot_id, fetched)
+        tracks.extend(fetched)
     return tracks
 
 
 def filter_not_local(
-    tracks: list[QueuedTrack], library: LibraryIndex, threshold: int, on_progress=None
+    tracks: list[QueuedTrack], library: LibraryIndex, threshold: int, on_progress=None, catalog: Catalog | None = None
 ) -> list[QueuedTrack]:
     """Drop tracks that already have a fuzzy-matching file in the local
     library. Pure local computation (already-scanned file list + in-memory
-    fuzzy comparisons) -- costs zero extra Spotify requests."""
+    fuzzy comparisons) -- costs zero extra Spotify requests. With a catalog,
+    tracks already linked to a file skip matching, and new matches are
+    linked so the next run (and the named playlist files) can use them."""
     if on_progress is not None:
         on_progress(f"Checking {len(tracks)} track(s) against your local library...")
+    linked = catalog.linked_uris([t.uri for t in tracks]) if catalog is not None else set()
     index = library.match_index()
     kept = []
     for track in tracks:
-        candidate, _ = index.best(track.title, track.artists, threshold=threshold)
+        if track.uri in linked:
+            continue
+        candidate, result = index.best(track.title, track.artists, threshold=threshold)
         if candidate is None:
             kept.append(track)
+        elif catalog is not None:
+            catalog.link(track.uri, candidate.path, "match", result.score)
     return kept
 
 
@@ -136,11 +155,14 @@ def run_queue(
     interrupt_playback: bool,
     fuzzy_threshold: int,
     on_progress=None,
-    history: QueueHistory | None = None,
-    playlist_names: dict[str, str] | None = None,
+    catalog: Catalog | None = None,
+    snapshots: dict[str, str] | None = None,
     library_max_age_seconds: float = 300,
 ) -> QueueResult:
-    tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress)
+    cached_playlists = sum(
+        catalog is not None and catalog.is_current(pid, (snapshots or {}).get(pid)) for pid in playlist_ids
+    )
+    tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress, catalog=catalog, snapshots=snapshots)
     total = len(tracks)
 
     # First occurrence wins, so a track on two playlists belongs to the earlier one in queue order.
@@ -159,20 +181,22 @@ def run_queue(
             on_progress("Scanning local library...")
         library.rescan_if_older_than(library_max_age_seconds)
         before = len(tracks)
-        tracks = filter_not_local(tracks, library, fuzzy_threshold, on_progress=on_progress)
+        tracks = filter_not_local(tracks, library, fuzzy_threshold, on_progress=on_progress, catalog=catalog)
         skipped_local = before - len(tracks)
 
     queued = queue_tracks(spotify, device_name, tracks, interrupt_playback, on_progress=on_progress)
     # Recorded only so downloads can be filed under their source playlist -- not
     # used to skip tracks: Spotify's queue is replaced by the next start_playback
     # and dropped when the session ends, so "sent to Spotify" proves nothing.
-    if history is not None and queued:
-        history.record_queued(tracks, playlist_names or {})
+    if catalog is not None and queued:
+        catalog.record_queued(tracks)
     logger.info(
-        "Queued %d/%d track(s) from %d playlist(s) (%d already local, %d duplicate, skipped)",
+        "Queued %d/%d track(s) from %d playlist(s), %d cached / %d fetched (%d already local, %d duplicate, skipped)",
         queued,
         total,
         len(playlist_ids),
+        cached_playlists,
+        len(playlist_ids) - cached_playlists,
         skipped_local,
         skipped_duplicate,
     )
@@ -181,4 +205,5 @@ def run_queue(
         skipped_local=skipped_local,
         queued=queued,
         skipped_duplicate=skipped_duplicate,
+        cached_playlists=cached_playlists,
     )

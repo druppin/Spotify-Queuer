@@ -4,19 +4,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import logging
+
 from . import logging_setup
+from .catalog import Catalog, rewrite_playlist_files
 from .config import AppConfig
 from .db import ensure_migrated
 from .download_watcher import DownloadWatcher
 from .library_index import LibraryIndex
-from .queue_history import QueueHistory
 from .queue_engine import QueueResult, run_queue
 from .rate_limiter import RateLimiter
 from .spotify_client import SpotifyClient
 
 DB_FILENAME = "spotify_queuer.sqlite3"
-QUEUE_HISTORY_DB_FILENAME = "queue_history.sqlite3"
 TOKEN_CACHE_FILENAME = ".spotify_token_cache"
+
+logger = logging.getLogger("spotify_queuer.app")
 
 
 def default_config_path() -> Path:
@@ -44,7 +47,7 @@ class Application:
         self.db_path = self.config_path.parent / DB_FILENAME
         ensure_migrated(self.db_path, legacy_dir=self.config_path.parent)
         self.library_index = LibraryIndex(self.config.paths.music_root, db_path=self.db_path)
-        self.queue_history = QueueHistory(self.config_path.parent / QUEUE_HISTORY_DB_FILENAME)
+        self.catalog = Catalog(self.db_path)
         self.download_watcher: DownloadWatcher | None = None
 
     # -- download watcher lifecycle (GUI wires its bridge callbacks in before starting) --
@@ -60,7 +63,7 @@ class Application:
             fallback_rescan_seconds=self.config.download_watch.fallback_rescan_seconds,
             on_new_file=on_new_file,
             on_error=on_error,
-            queue_history=self.queue_history,
+            catalog=self.catalog,
             fuzzy_threshold=self.config.matching.fuzzy_threshold,
         )
         self.download_watcher.start()
@@ -84,12 +87,17 @@ class Application:
         playlist_ids: list[str],
         interrupt_playback: bool | None = None,
         on_progress=None,
-        playlist_names: dict[str, str] | None = None,
     ) -> QueueResult:
         """interrupt_playback=None uses the configured default (the main
         "Queue Selected" button); pass False explicitly for "Add After
         Current", which must always append regardless of that setting."""
         interrupt = self.config.queue.interrupt_playback if interrupt_playback is None else interrupt_playback
+        # Listed fresh (one request per 50 playlists) for current snapshot_ids,
+        # so an unchanged playlist's tracks can come from the database instead.
+        if on_progress is not None:
+            on_progress("Checking your playlists for changes...")
+        playlists = self.spotify.list_user_playlists()
+        self.catalog.sync_playlists(playlists)
         result = run_queue(
             self.spotify,
             self.library_index,
@@ -99,9 +107,14 @@ class Application:
             interrupt_playback=interrupt,
             fuzzy_threshold=self.config.matching.fuzzy_threshold,
             on_progress=on_progress,
-            history=self.queue_history,
-            playlist_names=playlist_names,
+            catalog=self.catalog,
+            snapshots={p["id"]: p.get("snapshot_id") for p in playlists},
         )
+        if self.config.paths.m3u_output_dir:
+            try:
+                rewrite_playlist_files(self.catalog, playlist_ids, self.config.paths.m3u_output_dir)
+            except OSError:
+                logger.exception("Failed to write source playlist files")
         self.config.queue.last_selected_playlist_ids = list(playlist_ids)
         self.save_config()
         return result

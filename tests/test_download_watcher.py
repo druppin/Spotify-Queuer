@@ -163,27 +163,29 @@ def test_rescan_reports_error_when_folder_missing(tmp_path):
     watcher._seen.close()
 
 
-def _watcher_with_history(tmp_path):
+def _watcher_with_catalog(tmp_path):
+    from spotify_queuer.catalog import Catalog
     from spotify_queuer.queue_engine import QueuedTrack
-    from spotify_queuer.queue_history import QueueHistory
 
-    history = QueueHistory(tmp_path / "history.sqlite3")
-    history.record_queued(
-        [QueuedTrack("spotify:track:a", "Song A", "Artist 1", playlist_id="p1")], {"p1": "Friday Set"}
-    )
+    db = tmp_path / "app.sqlite3"
+    catalog = Catalog(db)
+    catalog.sync_playlists([{"id": "p1", "name": "Friday Set"}])
+    tracks = [QueuedTrack("spotify:track:a", "Song A", "Artist 1", playlist_id="p1")]
+    catalog.store_playlist("p1", "s1", tracks)
+    catalog.record_queued(tracks)
     watch_dir = tmp_path / "Downloads"
     watch_dir.mkdir()
     watcher = DownloadWatcher(
         watch_dir=watch_dir,
         m3u_output_dir=tmp_path / "Playlists",
-        state_db_path=tmp_path / "state.sqlite3",
-        queue_history=history,
+        state_db_path=db,
+        catalog=catalog,
     )
-    return watcher, history, watch_dir
+    return watcher, catalog, watch_dir
 
 
 def test_download_matching_a_queued_track_lands_in_its_source_playlist(tmp_path):
-    watcher, history, watch_dir = _watcher_with_history(tmp_path)
+    watcher, catalog, watch_dir = _watcher_with_catalog(tmp_path)
     song = watch_dir / "Song A - Artist 1.mp3"
     song.write_bytes(b"x")
     _age_file(song, 60)
@@ -192,13 +194,13 @@ def test_download_matching_a_queued_track_lands_in_its_source_playlist(tmp_path)
 
     named = tmp_path / "Playlists" / "Friday Set.m3u8"
     assert named.exists() and song.name in named.read_text(encoding="utf-8")
-    assert [p.name for p, _, _ in history.downloads_for_playlist("p1")] == [song.name]
+    assert catalog.linked_uris(["spotify:track:a"]) == {"spotify:track:a"}
     assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))  # still in the dated playlist too
     watcher._seen.close()
 
 
 def test_download_not_matching_any_queued_track_gets_no_named_playlist(tmp_path):
-    watcher, history, watch_dir = _watcher_with_history(tmp_path)
+    watcher, catalog, watch_dir = _watcher_with_catalog(tmp_path)
     song = watch_dir / "Other Song - Someone Else.mp3"
     song.write_bytes(b"x")
     _age_file(song, 60)
