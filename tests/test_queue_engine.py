@@ -17,7 +17,8 @@ class FakeSpotify:
         self.playback_state = None
         self.devices = []
         self.queued_uris = []
-        self.started_playback = None  # (device_id, uris)
+        self.started_context = None  # (device_id, context_uri)
+        self.skips = 0
 
     def get_playlist_tracks(self, playlist_id):
         return self.playlists[playlist_id]
@@ -31,8 +32,12 @@ class FakeSpotify:
     def queue_track(self, uri):
         self.queued_uris.append(uri)
 
-    def start_playback(self, device_id, uris):
-        self.started_playback = (device_id, list(uris))
+    def start_context(self, device_id, context_uri):
+        self.started_context = (device_id, context_uri)
+        self.playback_state = {"is_playing": True, "device": {"id": device_id}}
+
+    def next_track(self, device_id):
+        self.skips += 1
 
 
 def make_track(track_id, name, artists):
@@ -80,19 +85,20 @@ def test_filter_not_local_drops_matching_local_files(tmp_path):
     assert [t.uri for t in kept] == ["spotify:track:b"]
 
 
-def test_queue_tracks_starts_playback_when_nothing_active():
+def test_queue_tracks_starts_source_playlist_when_nothing_active_then_skips_to_queue():
     spotify = FakeSpotify()
     spotify.devices = [{"id": "dev1", "name": "My PC"}]
     spotify.playback_state = None
 
     from spotify_queuer.queue_engine import QueuedTrack
 
-    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X")]
+    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X", playlist_id="p1")]
     queued = queue_tracks(spotify, "My PC", tracks, interrupt_playback=False)
 
     assert queued == 1
-    assert spotify.started_playback == ("dev1", ["spotify:track:a"])
-    assert spotify.queued_uris == []
+    assert spotify.started_context == ("dev1", "spotify:playlist:p1")
+    assert spotify.queued_uris == ["spotify:track:a"]
+    assert spotify.skips == 1  # off the playlist's first track, onto the queued one
 
 
 def test_queue_tracks_appends_when_something_playing():
@@ -102,26 +108,29 @@ def test_queue_tracks_appends_when_something_playing():
 
     from spotify_queuer.queue_engine import QueuedTrack
 
-    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X")]
+    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X", playlist_id="p1")]
     queued = queue_tracks(spotify, "My PC", tracks, interrupt_playback=False)
 
     assert queued == 1
     assert spotify.queued_uris == ["spotify:track:a"]
-    assert spotify.started_playback is None
+    assert spotify.started_context is None
+    assert spotify.skips == 0
 
 
-def test_queue_tracks_interrupt_playback_always_uses_start_playback():
+def test_queue_tracks_interrupt_skips_to_the_queued_tracks():
     spotify = FakeSpotify()
     spotify.devices = [{"id": "dev1", "name": "My PC"}]
     spotify.playback_state = {"is_playing": True, "device": {"id": "dev1"}}
 
     from spotify_queuer.queue_engine import QueuedTrack
 
-    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X")]
+    tracks = [QueuedTrack(uri="spotify:track:a", title="A", artists="X", playlist_id="p1")]
     queued = queue_tracks(spotify, "My PC", tracks, interrupt_playback=True)
 
     assert queued == 1
-    assert spotify.started_playback == ("dev1", ["spotify:track:a"])
+    assert spotify.queued_uris == ["spotify:track:a"]
+    assert spotify.started_context is None
+    assert spotify.skips == 1
 
 
 def test_queue_tracks_raises_when_device_missing():
@@ -175,7 +184,7 @@ def test_run_queue_end_to_end(tmp_path):
     assert result.total_tracks == 2
     assert result.skipped_local == 1
     assert result.queued == 1
-    assert spotify.started_playback == ("dev1", ["spotify:track:b"])
+    assert spotify.queued_uris == ["spotify:track:b"]
 
 
 def _queue_setup(tmp_path):
@@ -204,7 +213,7 @@ def _run(spotify, library, catalog, playlist_ids, snapshots=None):
 def test_run_queue_queues_track_on_two_playlists_once(tmp_path):
     spotify, library, catalog = _queue_setup(tmp_path)
     result = _run(spotify, library, catalog, ["p1", "p2"])
-    assert spotify.started_playback == ("dev1", ["spotify:track:a", "spotify:track:b", "spotify:track:c"])
+    assert spotify.queued_uris[-3:] == ["spotify:track:a", "spotify:track:b", "spotify:track:c"]
     assert result.skipped_duplicate == 1
     row = catalog._conn.execute("SELECT playlist_id FROM queue_events WHERE track_id = 'b'").fetchone()
     assert row == ("p1",)  # first playlist in queue order wins
@@ -230,7 +239,7 @@ def test_run_queue_reads_unchanged_playlists_from_the_database(tmp_path):
 
     assert fetches == ["p1", "p2", "p2"]  # p1 unchanged on the second run, p2's snapshot moved
     assert result.cached_playlists == 1
-    assert spotify.started_playback == ("dev1", ["spotify:track:a", "spotify:track:b", "spotify:track:c"])
+    assert spotify.queued_uris[-3:] == ["spotify:track:a", "spotify:track:b", "spotify:track:c"]
 
 
 def test_run_queue_without_snapshot_always_fetches(tmp_path):

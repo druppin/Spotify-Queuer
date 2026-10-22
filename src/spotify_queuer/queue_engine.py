@@ -1,10 +1,11 @@
 """Builds a track list from selected Spotify playlists and sends it to
 playback -- the core of the "pick playlists on the left, queue them" feature.
 
-No batch queue endpoint exists in the Spotify Web API: appending behind
-whatever's currently playing costs one request per track (queue_track), no
-way around it. Replacing playback outright (start_playback) costs exactly
-one request for the whole batch, at the cost of interrupting what's playing.
+No batch queue endpoint exists in the Spotify Web API, so every track costs
+one add-to-queue request (queue_track). Starting playback with a list of
+track URIs would be one request, but the Spotify desktop client accepts that
+call and then plays nothing (verified 2026-10-22: a playlist context and
+add-to-queue both work on the same device), so it isn't used.
 """
 from __future__ import annotations
 
@@ -119,30 +120,35 @@ def queue_tracks(
     interrupt_playback: bool = False,
     on_progress=None,
 ) -> int:
-    """Send `tracks` to Spotify playback per the app's queue policy.
+    """Add `tracks` to Spotify's queue, one request per track, in order.
 
-    Nothing currently active, or interrupt_playback=True: one start_playback
-    request replaces/starts playback with the whole batch. Otherwise: one
-    queue_track request per track, appended behind what's already playing --
-    on_progress(message), if given, is called before each of those individual
-    requests, since that loop is the slowest part of queuing a big playlist.
+    Nothing active on the device: the first track's source playlist is
+    started first, since the queue needs something playing to sit behind.
+    interrupt_playback=True (or that fresh start): after queuing, skip to the
+    first queued track. Otherwise the tracks wait behind what's playing.
+    on_progress(message), if given, is called before each add-to-queue
+    request, since that loop is the slowest part of queuing a big playlist.
     """
     if not tracks:
         return 0
 
     device_id = resolve_device_id(spotify, device_name)
-    state = spotify.get_playback_state()
-
-    if interrupt_playback or state is None:
-        if on_progress is not None:
-            on_progress(f"Starting playback with {len(tracks)} track(s)...")
-        spotify.start_playback(device_id, uris=[t.uri for t in tracks])
-        return len(tracks)
+    started = False
+    if spotify.get_playback_state() is None:
+        playlist_id = next((t.playlist_id for t in tracks if t.playlist_id), None)
+        if playlist_id:
+            if on_progress is not None:
+                on_progress("Starting playback...")
+            spotify.start_context(device_id, f"spotify:playlist:{playlist_id}")
+            started = True
 
     for i, track in enumerate(tracks, start=1):
         if on_progress is not None:
             on_progress(f"Queuing track {i}/{len(tracks)}: {track.title}")
         spotify.queue_track(track.uri)
+
+    if interrupt_playback or started:
+        spotify.next_track(device_id)  # leave whatever's playing for the first queued track
     return len(tracks)
 
 
@@ -186,8 +192,8 @@ def run_queue(
 
     queued = queue_tracks(spotify, device_name, tracks, interrupt_playback, on_progress=on_progress)
     # Recorded only so downloads can be filed under their source playlist -- not
-    # used to skip tracks: Spotify's queue is replaced by the next start_playback
-    # and dropped when the session ends, so "sent to Spotify" proves nothing.
+    # used to skip tracks: Spotify's queue can be cleared or replaced and is
+    # dropped when the session ends, so "sent to Spotify" proves nothing.
     if catalog is not None and queued:
         catalog.record_queued(tracks)
     logger.info(

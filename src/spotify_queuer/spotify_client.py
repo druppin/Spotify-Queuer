@@ -125,11 +125,13 @@ class SpotifyClient:
     def queue_track(self, uri: str) -> None:
         self._call(self._sp.add_to_queue, uri)
 
-    def start_playback(self, device_id: str, uris: list[str]) -> None:
-        """Replace current playback with `uris` in a single request -- the only
-        way to queue many tracks at once; unlike queue_track, this interrupts
-        whatever's currently playing."""
-        self._call(self._sp.start_playback, device_id=device_id, uris=uris)
+    def start_context(self, device_id: str, context_uri: str) -> None:
+        """Start playing a playlist/album context. (Not start_playback with a
+        uris list: the desktop client accepts that and then plays nothing.)"""
+        self._call(self._sp.start_playback, device_id=device_id, context_uri=context_uri)
+
+    def next_track(self, device_id: str) -> None:
+        self._call(self._sp.next_track, device_id=device_id)
 
     def get_queue(self) -> dict:
         """Used to confirm a queue call landed and avoid duplicate adds (§5)."""

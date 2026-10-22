@@ -29,10 +29,9 @@ class QueueConfig:
 
     last_selected_playlist_ids: list[str] = dataclasses.field(default_factory=list)
     skip_local_tracks: bool = True
-    # True (default): always replace playback with the selected batch in a
-    # single start_playback request, interrupting whatever's currently on.
-    # False: append behind what's playing instead -- costs one add-to-queue
-    # request per track, since Spotify has no bulk queue endpoint.
+    # True (default): skip straight to the queued batch, interrupting whatever's
+    # currently on. False: the batch waits behind what's playing. Either way it
+    # costs one add-to-queue request per track; Spotify has no bulk endpoint.
     interrupt_playback: bool = True
 
 

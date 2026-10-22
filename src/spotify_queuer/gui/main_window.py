@@ -155,7 +155,7 @@ class MainWindow(QMainWindow):
         self._skip_local_checkbox.toggled.connect(self._on_skip_local_toggled)
         left_layout.addWidget(self._skip_local_checkbox)
 
-        self._interrupt_checkbox = QCheckBox("Interrupt current playback (1 request)")
+        self._interrupt_checkbox = QCheckBox("Skip straight to the queued tracks")
         self._interrupt_checkbox.setChecked(self._app.config.queue.interrupt_playback)
         self._interrupt_checkbox.toggled.connect(self._on_interrupt_toggled)
         left_layout.addWidget(self._interrupt_checkbox)
