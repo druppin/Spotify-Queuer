@@ -1,12 +1,6 @@
-"""Persisted record of every track the app has sent to Spotify playback, so a
-track queued yesterday (and maybe not downloaded yet) isn't queued again
-today. The local-library check alone can't catch that: a queued track only
-shows up in the library once its download lands and gets sorted in.
-
-A pending (queued, not yet downloaded) track blocks re-queuing for
-requeue_after_seconds -- long enough to cover a normal download, short
-enough that a download that failed outright doesn't block the track forever.
-"""
+"""Persisted record of every track the app has sent to Spotify playback and
+which selected playlist it came from, so the download watcher can file a new
+download under `<source playlist name>.m3u8`."""
 from __future__ import annotations
 
 import sqlite3
@@ -42,20 +36,8 @@ class QueueHistory:
     def close(self) -> None:
         self._conn.close()
 
-    def blocked_uris(self, requeue_after_seconds: float, now: float | None = None) -> set[str]:
-        """URIs that must not be queued again: already downloaded, or queued
-        within the last requeue_after_seconds and still pending."""
-        now = time.time() if now is None else now
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT uri FROM queued_tracks WHERE downloaded_at IS NOT NULL OR queued_at > ?",
-                (now - requeue_after_seconds,),
-            ).fetchall()
-        return {r[0] for r in rows}
-
     def record_queued(self, tracks, playlist_names: dict[str, str], now: float | None = None) -> None:
-        """Record `tracks` (QueuedTrack) as queued now. Re-recording an
-        expired pending track restarts its wait under its newest playlist."""
+        """Record `tracks` (QueuedTrack) as queued now, under their newest playlist."""
         now = time.time() if now is None else now
         rows = [
             (t.uri, t.title, t.artists, t.playlist_id, playlist_names.get(t.playlist_id, t.playlist_id), now)

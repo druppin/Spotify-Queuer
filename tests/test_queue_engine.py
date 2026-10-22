@@ -207,28 +207,10 @@ def test_run_queue_queues_track_on_two_playlists_once(tmp_path):
     assert row == ("Mix One",)  # first playlist in queue order wins
 
 
-def test_run_queue_twice_queues_nothing_the_second_time(tmp_path):
+def test_run_queue_requeues_tracks_an_earlier_run_sent_but_never_downloaded(tmp_path):
+    # Spotify's queue is volatile (replaced by the next start_playback, dropped
+    # when the session ends), so an earlier run's tracks must not be skipped.
     spotify, library, history = _queue_setup(tmp_path)
     _run(spotify, library, history, ["p1"])
-    spotify.started_playback = None
     result = _run(spotify, library, history, ["p1"])
-    assert result.queued == 0
-    assert result.skipped_already_queued == 2
-    assert spotify.started_playback is None
-
-
-def test_run_queue_requeues_pending_track_after_expiry(tmp_path):
-    spotify, library, history = _queue_setup(tmp_path)
-    _run(spotify, library, history, ["p1"])
-    result = _run(spotify, library, history, ["p1"], requeue_after_seconds=0)
-    assert result.queued == 2
-
-
-def test_run_queue_ignores_history_when_skip_local_is_off(tmp_path):
-    spotify, library, history = _queue_setup(tmp_path)
-    _run(spotify, library, history, ["p1"])
-    result = run_queue(
-        spotify, library, "My PC", ["p1"], skip_local=False, interrupt_playback=True, fuzzy_threshold=87,
-        history=history,
-    )
     assert result.queued == 2

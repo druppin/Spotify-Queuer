@@ -32,7 +32,6 @@ class QueueResult:
     skipped_local: int
     queued: int
     skipped_duplicate: int = 0  # same track on more than one selected playlist
-    skipped_already_queued: int = 0  # queued by an earlier run, download pending or done
 
 
 class DeviceNotFoundError(RuntimeError):
@@ -139,7 +138,6 @@ def run_queue(
     on_progress=None,
     history: QueueHistory | None = None,
     playlist_names: dict[str, str] | None = None,
-    requeue_after_seconds: float = 7 * 24 * 3600,
     library_max_age_seconds: float = 300,
 ) -> QueueResult:
     tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress)
@@ -155,13 +153,8 @@ def run_queue(
     skipped_duplicate = total - len(unique)
     tracks = unique
 
-    skipped_local = skipped_already_queued = 0
+    skipped_local = 0
     if skip_local:
-        if history is not None:
-            blocked = history.blocked_uris(requeue_after_seconds)
-            before = len(tracks)
-            tracks = [t for t in tracks if t.uri not in blocked]
-            skipped_already_queued = before - len(tracks)
         if on_progress is not None:
             on_progress("Scanning local library...")
         library.rescan_if_older_than(library_max_age_seconds)
@@ -170,15 +163,17 @@ def run_queue(
         skipped_local = before - len(tracks)
 
     queued = queue_tracks(spotify, device_name, tracks, interrupt_playback, on_progress=on_progress)
+    # Recorded only so downloads can be filed under their source playlist -- not
+    # used to skip tracks: Spotify's queue is replaced by the next start_playback
+    # and dropped when the session ends, so "sent to Spotify" proves nothing.
     if history is not None and queued:
         history.record_queued(tracks, playlist_names or {})
     logger.info(
-        "Queued %d/%d track(s) from %d playlist(s) (%d already local, %d already queued, %d duplicate, skipped)",
+        "Queued %d/%d track(s) from %d playlist(s) (%d already local, %d duplicate, skipped)",
         queued,
         total,
         len(playlist_ids),
         skipped_local,
-        skipped_already_queued,
         skipped_duplicate,
     )
     return QueueResult(
@@ -186,5 +181,4 @@ def run_queue(
         skipped_local=skipped_local,
         queued=queued,
         skipped_duplicate=skipped_duplicate,
-        skipped_already_queued=skipped_already_queued,
     )

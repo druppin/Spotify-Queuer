@@ -101,7 +101,6 @@ class Application:
             on_progress=on_progress,
             history=self.queue_history,
             playlist_names=playlist_names,
-            requeue_after_seconds=self.config.queue.requeue_after_days * 24 * 3600,
         )
         self.config.queue.last_selected_playlist_ids = list(playlist_ids)
         self.save_config()

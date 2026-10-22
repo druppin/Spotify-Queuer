@@ -192,7 +192,7 @@ def test_download_matching_a_queued_track_lands_in_its_source_playlist(tmp_path)
 
     named = tmp_path / "Playlists" / "Friday Set.m3u8"
     assert named.exists() and song.name in named.read_text(encoding="utf-8")
-    assert history.blocked_uris(requeue_after_seconds=0) == {"spotify:track:a"}  # downloaded: blocked for good
+    assert [p.name for p, _, _ in history.downloads_for_playlist("p1")] == [song.name]
     assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))  # still in the dated playlist too
     watcher._seen.close()
 

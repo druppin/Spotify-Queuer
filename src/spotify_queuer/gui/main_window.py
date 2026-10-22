@@ -378,7 +378,6 @@ class MainWindow(QMainWindow):
             f"{count} {label}"
             for count, label in (
                 (result.skipped_local, "already local"),
-                (result.skipped_already_queued, "already queued"),
                 (result.skipped_duplicate, "duplicate"),
             )
             if count
