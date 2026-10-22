@@ -8,12 +8,14 @@ from . import logging_setup
 from .config import AppConfig
 from .download_watcher import DownloadWatcher
 from .library_index import LibraryIndex
+from .queue_history import QueueHistory
 from .queue_engine import QueueResult, run_queue
 from .rate_limiter import RateLimiter
 from .spotify_client import SpotifyClient
 
 DOWNLOAD_STATE_DB_FILENAME = "download_watcher_state.sqlite3"
 LIBRARY_DB_FILENAME = "library_index.sqlite3"
+QUEUE_HISTORY_DB_FILENAME = "queue_history.sqlite3"
 TOKEN_CACHE_FILENAME = ".spotify_token_cache"
 
 
@@ -42,6 +44,7 @@ class Application:
         self.library_index = LibraryIndex(
             self.config.paths.music_root, db_path=self.config_path.parent / LIBRARY_DB_FILENAME
         )
+        self.queue_history = QueueHistory(self.config_path.parent / QUEUE_HISTORY_DB_FILENAME)
         self.download_watcher: DownloadWatcher | None = None
 
     # -- download watcher lifecycle (GUI wires its bridge callbacks in before starting) --
@@ -75,7 +78,11 @@ class Application:
 
     # -- queue picker --
     def queue_selected_playlists(
-        self, playlist_ids: list[str], interrupt_playback: bool | None = None, on_progress=None
+        self,
+        playlist_ids: list[str],
+        interrupt_playback: bool | None = None,
+        on_progress=None,
+        playlist_names: dict[str, str] | None = None,
     ) -> QueueResult:
         """interrupt_playback=None uses the configured default (the main
         "Queue Selected" button); pass False explicitly for "Add After
@@ -90,6 +97,9 @@ class Application:
             interrupt_playback=interrupt,
             fuzzy_threshold=self.config.matching.fuzzy_threshold,
             on_progress=on_progress,
+            history=self.queue_history,
+            playlist_names=playlist_names,
+            requeue_after_seconds=self.config.queue.requeue_after_days * 24 * 3600,
         )
         self.config.queue.last_selected_playlist_ids = list(playlist_ids)
         self.save_config()

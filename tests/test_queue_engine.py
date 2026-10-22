@@ -175,3 +175,60 @@ def test_run_queue_end_to_end(tmp_path):
     assert result.skipped_local == 1
     assert result.queued == 1
     assert spotify.started_playback == ("dev1", ["spotify:track:b"])
+
+
+def _queue_setup(tmp_path):
+    from spotify_queuer.queue_history import QueueHistory
+
+    spotify = FakeSpotify()
+    spotify.devices = [{"id": "dev1", "name": "My PC"}]
+    spotify.playlists = {
+        "p1": [make_track("a", "Song A", ["Artist 1"]), make_track("b", "Song B", ["Artist 2"])],
+        "p2": [make_track("b", "Song B", ["Artist 2"]), make_track("c", "Song C", ["Artist 3"])],
+    }
+    library = LibraryIndex(tmp_path / "music")
+    history = QueueHistory(tmp_path / "history.sqlite3")
+    return spotify, library, history
+
+
+def _run(spotify, library, history, playlist_ids, **kwargs):
+    return run_queue(
+        spotify, library, "My PC", playlist_ids, skip_local=True, interrupt_playback=True, fuzzy_threshold=87,
+        history=history, playlist_names={"p1": "Mix One", "p2": "Mix Two"}, **kwargs,
+    )
+
+
+def test_run_queue_queues_track_on_two_playlists_once(tmp_path):
+    spotify, library, history = _queue_setup(tmp_path)
+    result = _run(spotify, library, history, ["p1", "p2"])
+    assert spotify.started_playback == ("dev1", ["spotify:track:a", "spotify:track:b", "spotify:track:c"])
+    assert result.skipped_duplicate == 1
+    row = history._conn.execute("SELECT playlist_name FROM queued_tracks WHERE uri = 'spotify:track:b'").fetchone()
+    assert row == ("Mix One",)  # first playlist in queue order wins
+
+
+def test_run_queue_twice_queues_nothing_the_second_time(tmp_path):
+    spotify, library, history = _queue_setup(tmp_path)
+    _run(spotify, library, history, ["p1"])
+    spotify.started_playback = None
+    result = _run(spotify, library, history, ["p1"])
+    assert result.queued == 0
+    assert result.skipped_already_queued == 2
+    assert spotify.started_playback is None
+
+
+def test_run_queue_requeues_pending_track_after_expiry(tmp_path):
+    spotify, library, history = _queue_setup(tmp_path)
+    _run(spotify, library, history, ["p1"])
+    result = _run(spotify, library, history, ["p1"], requeue_after_seconds=0)
+    assert result.queued == 2
+
+
+def test_run_queue_ignores_history_when_skip_local_is_off(tmp_path):
+    spotify, library, history = _queue_setup(tmp_path)
+    _run(spotify, library, history, ["p1"])
+    result = run_queue(
+        spotify, library, "My PC", ["p1"], skip_local=False, interrupt_playback=True, fuzzy_threshold=87,
+        history=history,
+    )
+    assert result.queued == 2

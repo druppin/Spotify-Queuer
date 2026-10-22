@@ -11,3 +11,4 @@ spotify_queuer_state.sqlite3
 _cache/
 *.egg-info/
 library_index.sqlite3
+queue_history.sqlite3

@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 
 from .library_index import LibraryIndex
+from .queue_history import QueueHistory
 from .spotify_client import SpotifyClient
 
 logger = logging.getLogger("spotify_queuer.queue_engine")
@@ -22,6 +23,7 @@ class QueuedTrack:
     uri: str
     title: str
     artists: str  # display string ("Artist A, Artist B"), used for fuzzy matching
+    playlist_id: str = ""  # the selected playlist this track was collected from
 
 
 @dataclass(frozen=True)
@@ -29,17 +31,19 @@ class QueueResult:
     total_tracks: int
     skipped_local: int
     queued: int
+    skipped_duplicate: int = 0  # same track on more than one selected playlist
+    skipped_already_queued: int = 0  # queued by an earlier run, download pending or done
 
 
 class DeviceNotFoundError(RuntimeError):
     pass
 
 
-def _track_from_raw(raw: dict) -> QueuedTrack | None:
+def _track_from_raw(raw: dict, playlist_id: str = "") -> QueuedTrack | None:
     if not raw or not raw.get("uri"):
         return None
     artists = ", ".join(a.get("name", "") for a in raw.get("artists", []) if a.get("name"))
-    return QueuedTrack(uri=raw["uri"], title=raw.get("name", "") or "", artists=artists)
+    return QueuedTrack(uri=raw["uri"], title=raw.get("name", "") or "", artists=artists, playlist_id=playlist_id)
 
 
 def collect_playlist_tracks(
@@ -57,7 +61,7 @@ def collect_playlist_tracks(
         if on_progress is not None:
             on_progress(f"Fetching tracks for playlist {i}/{len(playlist_ids)}...")
         for raw in spotify.get_playlist_tracks(playlist_id):
-            track = _track_from_raw(raw)
+            track = _track_from_raw(raw, playlist_id)
             if track is not None:
                 tracks.append(track)
     return tracks
@@ -133,23 +137,53 @@ def run_queue(
     interrupt_playback: bool,
     fuzzy_threshold: int,
     on_progress=None,
+    history: QueueHistory | None = None,
+    playlist_names: dict[str, str] | None = None,
+    requeue_after_seconds: float = 7 * 24 * 3600,
 ) -> QueueResult:
     tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress)
     total = len(tracks)
 
+    # First occurrence wins, so a track on two playlists belongs to the earlier one in queue order.
+    seen: set[str] = set()
+    unique = []
+    for track in tracks:
+        if track.uri not in seen:
+            seen.add(track.uri)
+            unique.append(track)
+    skipped_duplicate = total - len(unique)
+    tracks = unique
+
+    skipped_local = skipped_already_queued = 0
     if skip_local:
+        if history is not None:
+            blocked = history.blocked_uris(requeue_after_seconds)
+            before = len(tracks)
+            tracks = [t for t in tracks if t.uri not in blocked]
+            skipped_already_queued = before - len(tracks)
         if on_progress is not None:
             on_progress("Scanning local library...")
         library.rescan()
+        before = len(tracks)
         tracks = filter_not_local(tracks, library, fuzzy_threshold, on_progress=on_progress)
+        skipped_local = before - len(tracks)
 
-    skipped = total - len(tracks)
     queued = queue_tracks(spotify, device_name, tracks, interrupt_playback, on_progress=on_progress)
+    if history is not None and queued:
+        history.record_queued(tracks, playlist_names or {})
     logger.info(
-        "Queued %d/%d track(s) from %d playlist(s) (%d already local, skipped)",
+        "Queued %d/%d track(s) from %d playlist(s) (%d already local, %d already queued, %d duplicate, skipped)",
         queued,
         total,
         len(playlist_ids),
-        skipped,
+        skipped_local,
+        skipped_already_queued,
+        skipped_duplicate,
     )
-    return QueueResult(total_tracks=total, skipped_local=skipped, queued=queued)
+    return QueueResult(
+        total_tracks=total,
+        skipped_local=skipped_local,
+        queued=queued,
+        skipped_duplicate=skipped_duplicate,
+        skipped_already_queued=skipped_already_queued,
+    )

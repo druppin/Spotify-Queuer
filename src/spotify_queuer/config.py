@@ -34,6 +34,10 @@ class QueueConfig:
     # False: append behind what's playing instead -- costs one add-to-queue
     # request per track, since Spotify has no bulk queue endpoint.
     interrupt_playback: bool = True
+    # With skip_local_tracks on, a track already queued by an earlier run is
+    # skipped until it's downloaded -- or until this many days pass without
+    # a download, so a failed download doesn't block the track forever.
+    requeue_after_days: float = 7
 
 
 @dataclasses.dataclass

@@ -60,10 +60,13 @@ class _QueueWorker(QObject):
     finished = Signal(object)  # QueueResult
     failed = Signal(str)
 
-    def __init__(self, app: Application, playlist_ids: list[str], interrupt_override: bool | None):
+    def __init__(
+        self, app: Application, playlist_ids: list[str], interrupt_override: bool | None, playlist_names: dict[str, str]
+    ):
         super().__init__()
         self._app = app
         self._playlist_ids = playlist_ids
+        self._playlist_names = playlist_names
         self._interrupt_override = interrupt_override
 
     def run(self) -> None:
@@ -72,6 +75,7 @@ class _QueueWorker(QObject):
                 self._playlist_ids,
                 interrupt_playback=self._interrupt_override,
                 on_progress=self.progress.emit,
+                playlist_names=self._playlist_names,
             )
         except DeviceNotFoundError as exc:
             self.failed.emit(str(exc))
@@ -316,7 +320,11 @@ class MainWindow(QMainWindow):
         progress.show()
 
         thread = QThread(self)
-        worker = _QueueWorker(self._app, playlist_ids, interrupt_override)
+        names = {
+            self._queue_order_list.item(i).data(Qt.UserRole): self._queue_order_list.item(i).text()
+            for i in range(self._queue_order_list.count())
+        }
+        worker = _QueueWorker(self._app, playlist_ids, interrupt_override, names)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         # Worker signals must go to methods of a GUI-thread QObject (self /
@@ -348,8 +356,17 @@ class MainWindow(QMainWindow):
     def _on_queue_finished(self, result) -> None:
         self._finish_queue_run()
         message = f"Queued {result.queued} track(s)."
-        if result.skipped_local:
-            message += f" ({result.skipped_local} already local, skipped.)"
+        skipped = [
+            f"{count} {label}"
+            for count, label in (
+                (result.skipped_local, "already local"),
+                (result.skipped_already_queued, "already queued"),
+                (result.skipped_duplicate, "duplicate"),
+            )
+            if count
+        ]
+        if skipped:
+            message += f" (Skipped: {', '.join(skipped)}.)"
         QMessageBox.information(self, "Spotify Queuer", message)
 
     def _on_queue_failed(self, message: str) -> None:
