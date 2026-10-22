@@ -16,15 +16,15 @@ and forgotten.
 from __future__ import annotations
 
 import logging
-import sqlite3
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .db import connect, norm_path
 from .library_index import AUDIO_EXTENSIONS, read_tags
 from .m3u_writer import M3UEntry, sanitize_filename, write_playlist_m3u
 from .queue_history import QueueHistory
@@ -50,60 +50,66 @@ def _title_artists_from_filename(path: Path) -> tuple[str, str]:
 
 
 class SeenFiles:
-    """Persisted record of files already filed, keyed by resolved path +
+    """Persisted record of files already filed, keyed by normalized path +
     size + mtime -- a restart doesn't re-log everything, but a file that
     changed (re-downloaded, overwritten with different content) is treated
     as new again. Also the source of truth for "what's new today": the m3u8
     is rebuilt from this table rather than tracked separately, so an app
     restart mid-day doesn't lose earlier entries.
+
+    Stored as the seen_* columns of the shared library_files table (db.py),
+    kept apart from the library scan's own size/mtime so a scan that reached
+    a new file first can't make it look already seen.
     """
 
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = connect(self.db_path)
         self._lock = threading.Lock()
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS seen_files (
-                path TEXT PRIMARY KEY,
-                size INTEGER NOT NULL,
-                mtime REAL NOT NULL,
-                first_seen_date TEXT NOT NULL
-            )
-            """
-        )
-        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
 
     def mark_if_new(self, path: Path, size: int, mtime: float, today: date) -> bool:
         """Record (path, size, mtime); returns True if this is new (never
-        seen, or seen before with a different size/mtime)."""
-        key = str(path.resolve())
+        seen, or seen before with a different size/mtime). A first sighting
+        is dated `today` and flagged as needing Mixxx prep."""
+        key = norm_path(path.resolve())
         with self._lock:
             row = self._conn.execute(
-                "SELECT size, mtime FROM seen_files WHERE path = ?", (key,)
+                "SELECT seen_size, seen_mtime FROM library_files WHERE path = ?", (key,)
             ).fetchone()
             if row is not None and row[0] == size and row[1] == mtime:
                 return False
-            self._conn.execute(
-                """
-                INSERT INTO seen_files (path, size, mtime, first_seen_date) VALUES (?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime
-                """,
-                (key, size, mtime, today.isoformat()),
-            )
-            self._conn.commit()
+            first_seen = row is None or row[0] is None
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO library_files (path, seen_size, seen_mtime, first_seen_at, needs_prep)
+                    VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT(path) DO UPDATE SET seen_size = excluded.seen_size, seen_mtime = excluded.seen_mtime
+                    """,
+                    (key, size, mtime, _day_start(today)),
+                )
+                if first_seen and row is not None:  # known library file, first time the watcher sees it
+                    self._conn.execute(
+                        "UPDATE library_files SET first_seen_at = ?, needs_prep = 1 WHERE path = ?",
+                        (_day_start(today), key),
+                    )
             return True
 
     def paths_for_date(self, day: date) -> list[Path]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT path FROM seen_files WHERE first_seen_date = ? ORDER BY path", (day.isoformat(),)
+                "SELECT path FROM library_files WHERE seen_size IS NOT NULL"
+                " AND first_seen_at >= ? AND first_seen_at < ? ORDER BY path",
+                (_day_start(day), _day_start(day + timedelta(days=1))),
             ).fetchall()
         return [Path(r[0]) for r in rows]
+
+
+def _day_start(day: date) -> float:
+    return datetime.combine(day, datetime.min.time()).timestamp()
 
 
 def rewrite_daily_playlist(seen: SeenFiles, m3u_output_dir: Path | str, today: date, now: datetime | None = None) -> Path:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import logging_setup
 from .config import AppConfig
+from .db import ensure_migrated
 from .download_watcher import DownloadWatcher
 from .library_index import LibraryIndex
 from .queue_history import QueueHistory
@@ -13,8 +14,7 @@ from .queue_engine import QueueResult, run_queue
 from .rate_limiter import RateLimiter
 from .spotify_client import SpotifyClient
 
-DOWNLOAD_STATE_DB_FILENAME = "download_watcher_state.sqlite3"
-LIBRARY_DB_FILENAME = "library_index.sqlite3"
+DB_FILENAME = "spotify_queuer.sqlite3"
 QUEUE_HISTORY_DB_FILENAME = "queue_history.sqlite3"
 TOKEN_CACHE_FILENAME = ".spotify_token_cache"
 
@@ -41,9 +41,9 @@ class Application:
             rate_limiter=self.rate_limiter,
             open_browser=open_browser,
         )
-        self.library_index = LibraryIndex(
-            self.config.paths.music_root, db_path=self.config_path.parent / LIBRARY_DB_FILENAME
-        )
+        self.db_path = self.config_path.parent / DB_FILENAME
+        ensure_migrated(self.db_path, legacy_dir=self.config_path.parent)
+        self.library_index = LibraryIndex(self.config.paths.music_root, db_path=self.db_path)
         self.queue_history = QueueHistory(self.config_path.parent / QUEUE_HISTORY_DB_FILENAME)
         self.download_watcher: DownloadWatcher | None = None
 
@@ -56,7 +56,7 @@ class Application:
         self.download_watcher = DownloadWatcher(
             watch_dir=self.config.download_watch.watch_dir,
             m3u_output_dir=self.config.paths.m3u_output_dir,
-            state_db_path=self.config_path.parent / DOWNLOAD_STATE_DB_FILENAME,
+            state_db_path=self.db_path,
             fallback_rescan_seconds=self.config.download_watch.fallback_rescan_seconds,
             on_new_file=on_new_file,
             on_error=on_error,

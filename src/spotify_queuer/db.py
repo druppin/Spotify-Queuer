@@ -138,6 +138,8 @@ def _legacy_rows(path: Path, sql: str) -> list[tuple]:
 def _import_library(conn: sqlite3.Connection, path: Path) -> None:
     rows = _legacy_rows(
         path, "SELECT path, size, mtime, artist, album, title, artists, tag_title, tag_artists FROM library_tracks"
+    ) or _legacy_rows(  # DBs from before tags were indexed: NULL tags make the next rescan re-read them
+        path, "SELECT path, size, mtime, artist, album, title, artists, NULL, NULL FROM library_tracks"
     )
     conn.executemany(
         """

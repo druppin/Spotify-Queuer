@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -27,6 +26,7 @@ from pathlib import Path
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
 
+from .db import connect, norm_path
 from .matching import MatchIndex
 
 logger = logging.getLogger("spotify_queuer.library_index")
@@ -114,7 +114,7 @@ def _walk_audio_files(root: Path):
     listing already carries size/mtime, so this costs one listing per folder
     instead of an extra stat call per file.
     """
-    stack = [str(root)]
+    stack = [norm_path(root)]  # normalized so every yielded path matches db.norm_path
     while stack:
         current = stack.pop()
         try:
@@ -145,39 +145,16 @@ def scan_music_root(music_root: Path | str) -> list[LocalTrack]:
 
 
 class _LibraryDB:
-    """Persisted (path, size, mtime) -> parsed track rows."""
-
-    _TAG_COLUMNS = ("tag_title", "tag_artists")
+    """Persisted (path, size, mtime) -> parsed track rows: the in_library rows of
+    the shared library_files table (db.py)."""
 
     def __init__(self, db_path: Path | str):
-        db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS library_tracks (
-                path TEXT PRIMARY KEY,
-                size INTEGER NOT NULL,
-                mtime REAL NOT NULL,
-                artist TEXT NOT NULL,
-                album TEXT NOT NULL,
-                title TEXT NOT NULL,
-                artists TEXT NOT NULL,
-                tag_title TEXT,
-                tag_artists TEXT
-            )
-            """
-        )
-        # DBs from before tags were indexed: add the columns, left NULL so load() re-reads those files.
-        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(library_tracks)")}
-        for column in self._TAG_COLUMNS:
-            if column not in existing:
-                self._conn.execute(f"ALTER TABLE library_tracks ADD COLUMN {column} TEXT")
-        self._conn.commit()
+        self._conn = connect(db_path)
 
     def load(self) -> dict[str, tuple[int, float, LocalTrack | None]]:
         rows = self._conn.execute(
-            "SELECT path, size, mtime, artist, album, title, artists, tag_title, tag_artists FROM library_tracks"
+            "SELECT path, size, mtime, artist_folder, album_folder, title, artists, tag_title, tag_artists"
+            " FROM library_files WHERE in_library = 1"
         ).fetchall()
         entries = {}
         for path, size, mtime, artist, album, title, artists, tag_title, tag_artists in rows:
@@ -188,19 +165,22 @@ class _LibraryDB:
         return entries
 
     def apply_changes(self, upserts: list[tuple[str, int, float, LocalTrack]], deleted: list[str]) -> None:
+        now = time.time()
         with self._conn:
-            self._conn.executemany("DELETE FROM library_tracks WHERE path = ?", [(p,) for p in deleted])
+            # Gone from disk: the row goes too, cascading away its Spotify track links.
+            self._conn.executemany("DELETE FROM library_files WHERE path = ?", [(p,) for p in deleted])
             self._conn.executemany(
                 """
-                INSERT INTO library_tracks (path, size, mtime, artist, album, title, artists, tag_title, tag_artists)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO library_files (path, size, mtime, artist_folder, album_folder, title, artists,
+                                           tag_title, tag_artists, in_library, first_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
                 ON CONFLICT(path) DO UPDATE SET
-                    size = excluded.size, mtime = excluded.mtime, artist = excluded.artist,
-                    album = excluded.album, title = excluded.title, artists = excluded.artists,
-                    tag_title = excluded.tag_title, tag_artists = excluded.tag_artists
+                    size = excluded.size, mtime = excluded.mtime, artist_folder = excluded.artist_folder,
+                    album_folder = excluded.album_folder, title = excluded.title, artists = excluded.artists,
+                    tag_title = excluded.tag_title, tag_artists = excluded.tag_artists, in_library = 1
                 """,
                 [
-                    (p, size, mtime, t.artist, t.album, t.title, t.artists, t.tag_title, t.tag_artists)
+                    (p, size, mtime, t.artist, t.album, t.title, t.artists, t.tag_title, t.tag_artists, now)
                     for p, size, mtime, t in upserts
                 ],
             )

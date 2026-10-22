@@ -113,10 +113,12 @@ def test_match_index_matches_untagged_title_containing_dash(tmp_path):
 def test_rows_from_before_tags_were_indexed_are_reread(tmp_path):
     import sqlite3
 
-    music, db = tmp_path / "music", tmp_path / "lib.sqlite3"
+    from spotify_queuer.db import ensure_migrated
+
+    music, db = tmp_path / "music", tmp_path / "app.sqlite3"
     path = _tagged_mp3(music, "Artist/Album/Song.mp3", "Song - Extended Mix", ["Artist 1"])
     stat = path.stat()
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(tmp_path / "library_index.sqlite3")
     conn.execute(
         "CREATE TABLE library_tracks (path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime REAL NOT NULL, "
         "artist TEXT NOT NULL, album TEXT NOT NULL, title TEXT NOT NULL, artists TEXT NOT NULL)"
@@ -128,6 +130,7 @@ def test_rows_from_before_tags_were_indexed_are_reread(tmp_path):
     conn.commit()
     conn.close()
 
+    ensure_migrated(db, tmp_path)
     index = LibraryIndex(music, db_path=db)
     [track] = index.rescan()
     index.close()
