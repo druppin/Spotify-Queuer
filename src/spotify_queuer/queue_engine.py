@@ -140,6 +140,7 @@ def run_queue(
     history: QueueHistory | None = None,
     playlist_names: dict[str, str] | None = None,
     requeue_after_seconds: float = 7 * 24 * 3600,
+    library_max_age_seconds: float = 300,
 ) -> QueueResult:
     tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress)
     total = len(tracks)
@@ -163,7 +164,7 @@ def run_queue(
             skipped_already_queued = before - len(tracks)
         if on_progress is not None:
             on_progress("Scanning local library...")
-        library.rescan()
+        library.rescan_if_older_than(library_max_age_seconds)
         before = len(tracks)
         tracks = filter_not_local(tracks, library, fuzzy_threshold, on_progress=on_progress)
         skipped_local = before - len(tracks)

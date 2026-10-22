@@ -6,7 +6,7 @@ matched on their filename AND their title/artist tags (when present):
 Spotify titles often contain " - " themselves ("Song - Extended Mix"), so
 the filename alone is ambiguous.
 
-Scanned on demand (rescan() is called right before a "skip local tracks"
+Scanned on demand (rescan_if_older_than() runs right before a "skip local tracks"
 check in queue_engine.py), not watched independently. Rescans are
 incremental: given a db_path, every known file is persisted in SQLite with
 its size and mtime, so a rescan only lists directories and re-parses the
@@ -20,6 +20,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -221,6 +222,14 @@ class LibraryIndex:
         # the {Artist}/{Album}/ layout, remembered so they aren't re-parsed every scan.
         self._entries: dict[str, tuple[int, float, LocalTrack | None]] = self._db.load() if self._db else {}
         self._match_index: MatchIndex | None = None
+        self._last_scan: float | None = None
+
+    def rescan_if_older_than(self, max_age_seconds: float) -> None:
+        """Rescan unless the last scan finished within max_age_seconds -- the
+        walk is the slow part of queuing, and back-to-back queue runs rarely
+        see new library files in between."""
+        if self._last_scan is None or time.monotonic() - self._last_scan > max_age_seconds:
+            self.rescan()
 
     def rescan(self) -> list[LocalTrack]:
         if not self.music_root.exists():
@@ -250,6 +259,7 @@ class LibraryIndex:
                 self._match_index = None
                 if self._db is not None:
                     self._db.apply_changes(upserts, deleted_in_db)
+            self._last_scan = time.monotonic()
             logger.info(
                 "Library scan: %d file(s), %d new/changed, %d removed", len(new_entries), len(upserts), len(deleted)
             )

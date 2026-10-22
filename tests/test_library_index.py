@@ -133,3 +133,14 @@ def test_rows_from_before_tags_were_indexed_are_reread(tmp_path):
     index.close()
 
     assert track.tag_title == "Song - Extended Mix"
+
+
+def test_rescan_if_older_than_skips_a_fresh_scan(tmp_path):
+    library = LibraryIndex(tmp_path)
+    library.rescan_if_older_than(300)  # never scanned: scans
+    (tmp_path / "Artist" / "Album").mkdir(parents=True)
+    (tmp_path / "Artist" / "Album" / "Song A - Artist 1.mp3").write_bytes(b"x")
+    library.rescan_if_older_than(300)
+    assert library.tracks() == []  # scan is fresh, so the new file isn't seen yet
+    library.rescan_if_older_than(0)
+    assert len(library.tracks()) == 1
