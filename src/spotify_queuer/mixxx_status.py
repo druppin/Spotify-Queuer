@@ -30,8 +30,23 @@ def _key(path: str) -> str:
     return os.path.normcase(os.path.normpath(path))
 
 
-def sync_prep_status(db_path: Path | str, mixxx_db_path: Path | str) -> None:
-    """Refresh mixxx_status for every needs_prep file from Mixxx's database."""
+def _local_key(location: str, music_root: Path | str | None) -> str:
+    """Key for a Mixxx location on this machine. Mixxx may have been run on
+    another OS or drive letter (e.g. /run/media/<user>/<stick>/Music/... on
+    Linux), so a path containing the music root's folder name is re-rooted
+    under music_root: everything after the first /<folder>/ is kept."""
+    if music_root:
+        marker = f"/{Path(music_root).name}/"
+        location_slashed = location.replace("\\", "/")
+        index = location_slashed.find(marker)
+        if index >= 0:
+            return _key(os.path.join(str(music_root), location_slashed[index + len(marker):]))
+    return _key(location)
+
+
+def sync_prep_status(db_path: Path | str, mixxx_db_path: Path | str, music_root: Path | str | None = None) -> None:
+    """Refresh mixxx_status for every needs_prep file from Mixxx's database.
+    Matches on the full path, or on the path below music_root's folder name."""
     conn = connect(db_path)
     try:
         wanted = {_key(r[0]): r[0] for r in conn.execute("SELECT path FROM library_files WHERE needs_prep = 1")}
@@ -50,16 +65,19 @@ def sync_prep_status(db_path: Path | str, mixxx_db_path: Path | str) -> None:
         finally:
             mixxx.close()
         now = time.time()
+        matched = {}
+        for mixxx_id, location, rating, bpm_lock, hotcues in rows:
+            if not location:
+                continue
+            path = wanted.get(_key(location)) or wanted.get(_local_key(location, music_root))
+            if path is not None:
+                matched[path] = (path, mixxx_id, hotcues, rating, bpm_lock, now)
         with conn:
             conn.execute("DELETE FROM mixxx_status WHERE path IN (SELECT path FROM library_files WHERE needs_prep = 1)")
             conn.executemany(
                 "INSERT OR REPLACE INTO mixxx_status (path, mixxx_id, hotcue_count, rating, bpm_locked, synced_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    (wanted[_key(location)], mixxx_id, hotcues, rating, bpm_lock, now)
-                    for mixxx_id, location, rating, bpm_lock, hotcues in rows
-                    if location and _key(location) in wanted
-                ],
+                list(matched.values()),
             )
     finally:
         conn.close()

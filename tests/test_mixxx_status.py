@@ -70,3 +70,13 @@ def test_write_needs_prep_playlist_labels_what_is_missing(tmp_path):
     assert write_needs_prep_playlist(db, tmp_path / "Playlists") == 1
     text = (tmp_path / "Playlists" / "Needs prep.m3u8").read_text(encoding="utf-8")
     assert "Song [no hot cues, unrated, BPM not locked]" in text
+
+
+def test_mixxx_paths_from_another_machine_match_by_path_below_the_music_folder(tmp_path):
+    db, p = _app_db(tmp_path, [("Song - Artist.mp3", 1)])
+    linux_path = tmp_path / "linux" / "Music" / "Song - Artist.mp3"  # stands in for /run/media/<user>/<stick>/Music/...
+    _mixxx_db(tmp_path / "mixxxdb.sqlite", [(linux_path, 5, 1, 1)])
+
+    sync_prep_status(db, tmp_path / "mixxxdb.sqlite", music_root=tmp_path / "Music")
+
+    assert needs_prep(db) == []  # matched and set-ready

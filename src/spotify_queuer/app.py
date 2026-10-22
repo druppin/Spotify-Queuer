@@ -93,7 +93,7 @@ class Application:
                 self._warned_missing_mixxx_db = True
             return
         try:
-            sync_prep_status(self.db_path, mixxx_db)
+            sync_prep_status(self.db_path, mixxx_db, music_root=self.config.paths.music_root or None)
         except sqlite3.Error:
             logger.warning("Could not read the Mixxx database; will retry on the next rescan", exc_info=True)
             return
