@@ -153,6 +153,9 @@ class UsbSyncDialog(QDialog):
         self._diffs: list[TrackDiff] = []
         self._thread: QThread | None = None
         self._worker: _SyncWorker | None = None
+        self._progress: QProgressDialog | None = None
+        self._total_files = 0
+        self._files_done = 0
 
         layout = QVBoxLayout(self)
 
@@ -273,8 +276,8 @@ class UsbSyncDialog(QDialog):
         if not self._actions:
             return
         self._copy_btn.setEnabled(False)
-        total_files = len(self._actions)
-        files_done = 0
+        self._total_files = len(self._actions)
+        self._files_done = 0
 
         progress = QProgressDialog("Preparing to copy...", None, 0, 100, self)
         progress.setWindowTitle("Sync USB Sticks")
@@ -288,51 +291,52 @@ class UsbSyncDialog(QDialog):
         worker = _SyncWorker(list(self._actions))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-
-        def on_progress(relative_path: str, copied_bytes: int, total_bytes: int) -> None:
-            pct = int(copied_bytes / total_bytes * 100) if total_bytes else 100
-            progress.setValue(pct)
-            progress.setLabelText(
-                f"Copying file {files_done + 1} of {total_files}: {relative_path} "
-                f"({copied_bytes / 1_048_576:.1f} / {total_bytes / 1_048_576:.1f} MB)"
-            )
-
-        def on_file_done() -> None:
-            nonlocal files_done
-            files_done += 1
-
-        def cleanup() -> None:
-            thread.quit()
-            thread.wait()
-            worker.deleteLater()
-            thread.deleteLater()
-            self._thread = None
-            self._worker = None
-
-        def on_finished(copied: int) -> None:
-            progress.close()
-            cleanup()
-            QMessageBox.information(self, "Sync USB Sticks", f"Copied {copied} file(s).")
-            self._actions = []
-            self._diffs = []
-            self._populate_table()
-            self._summary_label.setText("")
-            self._copy_btn.setEnabled(False)
-            self._export_btn.setEnabled(False)
-
-        def on_failed(message: str, done: int) -> None:
-            logger.error("USB sync failed after %d file(s): %s", done, message)
-            progress.close()
-            cleanup()
-            QMessageBox.warning(self, "Sync USB Sticks", f"Copy failed after {done} file(s): {message}")
-            self._copy_btn.setEnabled(True)
-
-        worker.progress.connect(on_progress)
-        worker.file_done.connect(on_file_done)
-        worker.finished.connect(on_finished)
-        worker.failed.connect(on_failed)
+        # Connected to methods (not local functions) so they run on the GUI
+        # thread -- PySide runs plain functions on the emitting worker thread.
+        worker.progress.connect(self._on_copy_progress)
+        worker.file_done.connect(self._on_copy_file_done)
+        worker.finished.connect(self._on_copy_finished)
+        worker.failed.connect(self._on_copy_failed)
 
         # Kept as attributes so the thread/worker aren't garbage-collected mid-run.
+        self._progress = progress
         self._thread = thread
         self._worker = worker
         thread.start()
+
+    def _on_copy_progress(self, relative_path: str, copied_bytes: int, total_bytes: int) -> None:
+        pct = int(copied_bytes / total_bytes * 100) if total_bytes else 100
+        self._progress.setValue(pct)
+        self._progress.setLabelText(
+            f"Copying file {self._files_done + 1} of {self._total_files}: {relative_path} "
+            f"({copied_bytes / 1_048_576:.1f} / {total_bytes / 1_048_576:.1f} MB)"
+        )
+
+    def _on_copy_file_done(self) -> None:
+        self._files_done += 1
+
+    def _finish_copy_run(self) -> None:
+        self._progress.close()
+        self._progress = None
+        self._thread.quit()
+        self._thread.wait()
+        self._worker.deleteLater()
+        self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+
+    def _on_copy_finished(self, copied: int) -> None:
+        self._finish_copy_run()
+        QMessageBox.information(self, "Sync USB Sticks", f"Copied {copied} file(s).")
+        self._actions = []
+        self._diffs = []
+        self._populate_table()
+        self._summary_label.setText("")
+        self._copy_btn.setEnabled(False)
+        self._export_btn.setEnabled(False)
+
+    def _on_copy_failed(self, message: str, done: int) -> None:
+        logger.error("USB sync failed after %d file(s): %s", done, message)
+        self._finish_copy_run()
+        QMessageBox.warning(self, "Sync USB Sticks", f"Copy failed after {done} file(s): {message}")
+        self._copy_btn.setEnabled(True)

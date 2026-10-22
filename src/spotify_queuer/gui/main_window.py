@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self._suppress_check_signal = False
         self._queue_thread: QThread | None = None
         self._queue_worker: _QueueWorker | None = None
+        self._queue_progress: QProgressDialog | None = None
 
         self._network = QNetworkAccessManager(self)
         self._cover_cache_dir = self._app.config_path.parent / "_cache" / "covers"
@@ -318,38 +319,42 @@ class MainWindow(QMainWindow):
         worker = _QueueWorker(self._app, playlist_ids, interrupt_override)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        # Worker signals must go to methods of a GUI-thread QObject (self /
+        # the dialog): PySide runs plain local functions on the *emitting*
+        # thread, and building a QMessageBox there floods "setParent: new
+        # parent is in a different thread" and can crash.
         worker.progress.connect(progress.setLabelText)
-
-        def cleanup() -> None:
-            thread.quit()
-            thread.wait()
-            worker.deleteLater()
-            thread.deleteLater()
-            self._queue_thread = None
-            self._queue_worker = None
-            self._queue_btn.setEnabled(True)
-            self._add_after_btn.setEnabled(True)
-
-        def on_finished(result) -> None:
-            progress.close()
-            cleanup()
-            message = f"Queued {result.queued} track(s)."
-            if result.skipped_local:
-                message += f" ({result.skipped_local} already local, skipped.)"
-            QMessageBox.information(self, "Spotify Queuer", message)
-
-        def on_failed(message: str) -> None:
-            progress.close()
-            cleanup()
-            QMessageBox.warning(self, "Spotify Queuer", message)
-
-        worker.finished.connect(on_finished)
-        worker.failed.connect(on_failed)
+        worker.finished.connect(self._on_queue_finished)
+        worker.failed.connect(self._on_queue_failed)
 
         # Kept as attributes so the thread/worker aren't garbage-collected mid-run.
+        self._queue_progress = progress
         self._queue_thread = thread
         self._queue_worker = worker
         thread.start()
+
+    def _finish_queue_run(self) -> None:
+        self._queue_progress.close()
+        self._queue_progress = None
+        self._queue_thread.quit()
+        self._queue_thread.wait()
+        self._queue_worker.deleteLater()
+        self._queue_thread.deleteLater()
+        self._queue_thread = None
+        self._queue_worker = None
+        self._queue_btn.setEnabled(True)
+        self._add_after_btn.setEnabled(True)
+
+    def _on_queue_finished(self, result) -> None:
+        self._finish_queue_run()
+        message = f"Queued {result.queued} track(s)."
+        if result.skipped_local:
+            message += f" ({result.skipped_local} already local, skipped.)"
+        QMessageBox.information(self, "Spotify Queuer", message)
+
+    def _on_queue_failed(self, message: str) -> None:
+        self._finish_queue_run()
+        QMessageBox.warning(self, "Spotify Queuer", message)
 
     def _on_skip_local_toggled(self, checked: bool) -> None:
         self._app.config.queue.skip_local_tracks = checked
