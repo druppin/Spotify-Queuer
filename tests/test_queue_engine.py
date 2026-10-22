@@ -34,7 +34,8 @@ class FakeSpotify:
 
     def start_context(self, device_id, context_uri):
         self.started_context = (device_id, context_uri)
-        self.playback_state = {"is_playing": True, "device": {"id": device_id}}
+        name = next(d["name"] for d in self.devices if d["id"] == device_id)
+        self.playback_state = {"is_playing": True, "device": {"id": device_id, "name": name}, "item": {"uri": "x"}}
 
     def next_track(self, device_id):
         self.skips += 1
@@ -272,3 +273,25 @@ def test_deleted_file_drops_its_link_on_rescan(tmp_path):
     song.unlink()
     library.rescan()
     assert catalog.linked_uris(["spotify:track:a"]) == set()
+
+
+def test_verify_playback_raises_when_device_accepts_but_plays_nothing(monkeypatch):
+    from spotify_queuer import queue_engine
+    from spotify_queuer.queue_engine import PlaybackNotStartedError, verify_playback
+
+    monkeypatch.setattr(queue_engine.time, "sleep", lambda s: None)
+    spotify = FakeSpotify()
+    # What the stuck desktop client reported: active device, nothing loaded.
+    spotify.playback_state = {"is_playing": False, "device": {"id": "dev1", "name": "My PC"}, "item": None}
+    with pytest.raises(PlaybackNotStartedError):
+        verify_playback(spotify, "My PC", expect_playing=True)
+    with pytest.raises(PlaybackNotStartedError):
+        verify_playback(spotify, "My PC", expect_playing=False)
+
+
+def test_verify_playback_accepts_paused_device_when_appending():
+    from spotify_queuer.queue_engine import verify_playback
+
+    spotify = FakeSpotify()
+    spotify.playback_state = {"is_playing": False, "device": {"id": "dev1", "name": "My PC"}, "item": {"uri": "x"}}
+    verify_playback(spotify, "My PC", expect_playing=False)  # paused on purpose; tracks wait behind

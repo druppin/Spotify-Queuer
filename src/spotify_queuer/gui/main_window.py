@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from .. import logging_setup
 from ..app import Application
 from ..m3u_writer import sanitize_filename
-from ..queue_engine import DeviceNotFoundError
+from ..queue_engine import DeviceNotFoundError, PlaybackNotStartedError
 from .bridge import EngineBridge, QtLogHandler
 from .settings_dialog import SettingsDialog
 from .usb_sync_dialog import UsbSyncDialog
@@ -79,7 +79,7 @@ class _QueueWorker(QObject):
                 interrupt_playback=self._interrupt_override,
                 on_progress=self.progress.emit,
             )
-        except DeviceNotFoundError as exc:
+        except (DeviceNotFoundError, PlaybackNotStartedError) as exc:
             self.failed.emit(str(exc))
             return
         except Exception:

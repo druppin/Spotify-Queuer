@@ -10,6 +10,7 @@ add-to-queue both work on the same device), so it isn't used.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from .catalog import Catalog
@@ -38,6 +39,12 @@ class QueueResult:
 
 class DeviceNotFoundError(RuntimeError):
     pass
+
+
+class PlaybackNotStartedError(RuntimeError):
+    """Spotify accepted the requests but the device isn't playing them --
+    a stuck client answers every call with success, so only reading the
+    playback state back shows it."""
 
 
 def _track_from_raw(raw: dict, playlist_id: str = "") -> QueuedTrack | None:
@@ -152,6 +159,24 @@ def queue_tracks(
     return len(tracks)
 
 
+def verify_playback(
+    spotify: SpotifyClient, device_name: str, expect_playing: bool, attempts: int = 4, delay: float = 1.0
+) -> None:
+    """Raise PlaybackNotStartedError unless `device_name` has a track loaded
+    (and is playing, if expect_playing) within about attempts * delay seconds."""
+    for attempt in range(attempts):
+        state = spotify.get_playback_state() or {}
+        device = state.get("device") or {}
+        if device.get("name") == device_name and state.get("item") and (state.get("is_playing") or not expect_playing):
+            return
+        if attempt < attempts - 1:
+            time.sleep(delay)
+    raise PlaybackNotStartedError(
+        f"Spotify accepted the tracks, but '{device_name}' isn't playing them. "
+        "Open Spotify on that device, press play on any song once, then try again."
+    )
+
+
 def run_queue(
     spotify: SpotifyClient,
     library: LibraryIndex,
@@ -206,6 +231,8 @@ def run_queue(
         skipped_local,
         skipped_duplicate,
     )
+    if queued:
+        verify_playback(spotify, device_name, expect_playing=interrupt_playback)
     return QueueResult(
         total_tracks=total,
         skipped_local=skipped_local,
