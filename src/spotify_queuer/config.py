@@ -60,6 +60,9 @@ class PathsConfig:
     music_root: str = ""
     m3u_output_dir: str = ""
     log_dir: str = ""
+    # Mixxx's database, read to tell which new downloads are set-ready; empty
+    # means Mixxx's default location (%LOCALAPPDATA%\Mixxx\mixxxdb.sqlite).
+    mixxx_db: str = ""
 
 
 @dataclasses.dataclass

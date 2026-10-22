@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import logging
+import sqlite3
 
 from . import logging_setup
 from .catalog import Catalog, rewrite_playlist_files
@@ -12,6 +13,7 @@ from .config import AppConfig
 from .db import ensure_migrated
 from .download_watcher import DownloadWatcher
 from .library_index import LibraryIndex
+from .mixxx_status import default_mixxx_db_path, needs_prep, sync_prep_status, write_needs_prep_playlist
 from .queue_engine import QueueResult, run_queue
 from .rate_limiter import RateLimiter
 from .spotify_client import SpotifyClient
@@ -48,6 +50,7 @@ class Application:
         ensure_migrated(self.db_path, legacy_dir=self.config_path.parent)
         self.library_index = LibraryIndex(self.config.paths.music_root, db_path=self.db_path)
         self.catalog = Catalog(self.db_path)
+        self._warned_missing_mixxx_db = False
         self.download_watcher: DownloadWatcher | None = None
 
     # -- download watcher lifecycle (GUI wires its bridge callbacks in before starting) --
@@ -65,6 +68,7 @@ class Application:
             on_error=on_error,
             catalog=self.catalog,
             fuzzy_threshold=self.config.matching.fuzzy_threshold,
+            after_rescan=self.refresh_prep_status,
         )
         self.download_watcher.start()
 
@@ -77,6 +81,30 @@ class Application:
         if self.download_watcher is not None:
             self.download_watcher.stop()
             self.download_watcher = None
+
+    # -- Mixxx prep tracking --
+    def refresh_prep_status(self) -> None:
+        """Re-read Mixxx's prep status for new downloads and rewrite `Needs prep.m3u8`.
+        Called on start and after each downloads rescan, off the GUI thread."""
+        mixxx_db = Path(self.config.paths.mixxx_db) if self.config.paths.mixxx_db else default_mixxx_db_path()
+        if not mixxx_db.exists():
+            if not self._warned_missing_mixxx_db:
+                logger.warning("Mixxx database not found at %s; prep tracking is off (set it in Settings)", mixxx_db)
+                self._warned_missing_mixxx_db = True
+            return
+        try:
+            sync_prep_status(self.db_path, mixxx_db)
+        except sqlite3.Error:
+            logger.warning("Could not read the Mixxx database; will retry on the next rescan", exc_info=True)
+            return
+        if self.config.paths.m3u_output_dir:
+            try:
+                write_needs_prep_playlist(self.db_path, self.config.paths.m3u_output_dir)
+            except OSError:
+                logger.exception("Failed to write the Needs prep playlist")
+
+    def needs_prep_count(self) -> int:
+        return len(needs_prep(self.db_path))
 
     def save_config(self) -> None:
         self.config.save(self.config_path)

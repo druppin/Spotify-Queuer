@@ -195,6 +195,8 @@ def test_download_matching_a_queued_track_lands_in_its_source_playlist(tmp_path)
     named = tmp_path / "Playlists" / "Friday Set.m3u8"
     assert named.exists() and song.name in named.read_text(encoding="utf-8")
     assert catalog.linked_uris(["spotify:track:a"]) == {"spotify:track:a"}
+    flag = catalog._conn.execute("SELECT needs_prep FROM library_files WHERE path LIKE '%Song A - Artist 1.mp3'").fetchone()
+    assert flag == (1,)  # a new download is tracked until it's set-ready in Mixxx
     assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))  # still in the dated playlist too
     watcher._seen.close()
 

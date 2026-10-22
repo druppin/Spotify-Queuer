@@ -1,6 +1,6 @@
 """Settings panel: folder pickers for music_root, m3u_output_dir and the
-downloads watch dir; numeric fields for the rescan interval, rate limit and
-fuzzy-match threshold; a device-name field."""
+downloads watch dir; a file picker for Mixxx's database; numeric fields for
+the rescan interval, rate limit and fuzzy-match threshold; a device-name field."""
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
@@ -24,6 +24,22 @@ def _folder_row(initial: str, parent) -> tuple[QLineEdit, QHBoxLayout]:
 
     def pick() -> None:
         path = QFileDialog.getExistingDirectory(parent, "Select folder", line.text() or ".")
+        if path:
+            line.setText(path)
+
+    browse.clicked.connect(pick)
+    row = QHBoxLayout()
+    row.addWidget(line)
+    row.addWidget(browse)
+    return line, row
+
+
+def _file_row(initial: str, parent, caption: str, file_filter: str) -> tuple[QLineEdit, QHBoxLayout]:
+    line = QLineEdit(initial)
+    browse = QPushButton("Browse...")
+
+    def pick() -> None:
+        path, _ = QFileDialog.getOpenFileName(parent, caption, line.text() or ".", file_filter)
         if path:
             line.setText(path)
 
@@ -58,6 +74,12 @@ class SettingsDialog(QDialog):
         self.watch_dir_edit, watch_dir_row = _folder_row(config.download_watch.watch_dir, self)
         form.addRow("Downloads folder to watch", watch_dir_row)
 
+        self.mixxx_db_edit, mixxx_db_row = _file_row(
+            config.paths.mixxx_db, self, "Select mixxxdb.sqlite", "Mixxx database (*.sqlite)"
+        )
+        self.mixxx_db_edit.setPlaceholderText("Default: %LOCALAPPDATA%\\Mixxx\\mixxxdb.sqlite")
+        form.addRow("Mixxx database (for prep tracking)", mixxx_db_row)
+
         self.rescan_spin = _spin(5, 86400, config.download_watch.fallback_rescan_seconds)
         form.addRow("Downloads fallback rescan (s)", self.rescan_spin)
 
@@ -87,6 +109,7 @@ class SettingsDialog(QDialog):
         config.paths.music_root = self.music_root_edit.text()
         config.paths.m3u_output_dir = self.m3u_output_edit.text()
         config.download_watch.watch_dir = self.watch_dir_edit.text()
+        config.paths.mixxx_db = self.mixxx_db_edit.text()
         config.download_watch.fallback_rescan_seconds = self.rescan_spin.value()
         config.spotify.device_name = self.device_name_edit.text()
         config.matching.fuzzy_threshold = self.fuzzy_threshold_spin.value()

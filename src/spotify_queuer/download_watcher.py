@@ -186,9 +186,11 @@ class DownloadWatcher:
         on_error=None,
         catalog: Catalog | None = None,
         fuzzy_threshold: int = 87,
+        after_rescan=None,
     ):
         self.watch_dir = Path(watch_dir)
         self._catalog = catalog
+        self._after_rescan = after_rescan or (lambda: None)
         self.fuzzy_threshold = fuzzy_threshold
         self.m3u_output_dir = Path(m3u_output_dir)
         self.fallback_rescan_seconds = fallback_rescan_seconds
@@ -252,6 +254,7 @@ class DownloadWatcher:
             return
         for path in candidates:
             self._check_and_file(path)
+        self._after_rescan()
 
     def _check_and_file(self, path: Path) -> None:
         try:

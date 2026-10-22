@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QObject, QSize, QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -203,7 +203,8 @@ class MainWindow(QMainWindow):
         downloads_panel = QWidget()
         downloads_layout = QVBoxLayout(downloads_panel)
         downloads_layout.setContentsMargins(0, 0, 0, 0)
-        downloads_layout.addWidget(_heading("Recently downloaded"))
+        self._downloads_heading = _heading("Recently downloaded")
+        downloads_layout.addWidget(self._downloads_heading)
         self._downloads_view = QPlainTextEdit()
         self._downloads_view.setReadOnly(True)
         self._downloads_view.setMaximumBlockCount(2000)
@@ -240,6 +241,16 @@ class MainWindow(QMainWindow):
             on_error=lambda message: self._bridge.download_error.emit(message),
         )
         self._refresh_playlists()
+        self._app.refresh_prep_status()
+        self._update_prep_count()
+        # The watcher refreshes prep status from Mixxx after each rescan; this just re-reads the count.
+        self._prep_timer = QTimer(self)
+        self._prep_timer.timeout.connect(self._update_prep_count)
+        self._prep_timer.start(60_000)
+
+    def _update_prep_count(self) -> None:
+        count = self._app.needs_prep_count()
+        self._downloads_heading.setText(f"Recently downloaded · {count} need prep" if count else "Recently downloaded")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._app.stop()
