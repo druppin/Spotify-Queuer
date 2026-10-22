@@ -8,6 +8,7 @@ import csv
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,10 +19,16 @@ logger = logging.getLogger("spotify_queuer.usb_sync")
 # exact-equality comparison flags files as "changed" that are actually
 # identical copies -- allow a small tolerance instead.
 MTIME_TOLERANCE_SECONDS = 2.0
+# FAT32/exFAT can store local time, so a stick last written under another
+# time zone or DST offset shows every file shifted by whole hours -- without
+# this, a same-size file an exact number of hours off is "changed" and every
+# sync recopies the whole stick.
+_MAX_TZ_SHIFT_HOURS = 14
 
 # Copied in chunks (rather than one shutil.copy2 call) so callers can report
 # live progress through a large file instead of going quiet until it finishes.
-_COPY_CHUNK_SIZE = 4 * 1024 * 1024
+_COPY_CHUNK_SIZE = 16 * 1024 * 1024
+_PROGRESS_INTERVAL_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -89,6 +96,12 @@ def _file_stats(root: Path) -> dict[Path, os.stat_result]:
     return stats
 
 
+def _same_mtime(a: float, b: float) -> bool:
+    delta = abs(a - b)
+    hours = round(delta / 3600)
+    return hours <= _MAX_TZ_SHIFT_HOURS and abs(delta - hours * 3600) <= MTIME_TOLERANCE_SECONDS
+
+
 def compare_trees(source_root: Path | str, dest_root: Path | str) -> list[TrackDiff]:
     """Every file that differs between source_root and dest_root by relative
     path -- new on source, changed (size, or mtime beyond tolerance), or only
@@ -105,7 +118,7 @@ def compare_trees(source_root: Path | str, dest_root: Path | str) -> list[TrackD
             diffs.append(TrackDiff(rel, "new", src.st_size, None, src.st_mtime, None))
         elif src is None:
             diffs.append(TrackDiff(rel, "dest_only", None, dst.st_size, None, dst.st_mtime))
-        elif src.st_size != dst.st_size or abs(src.st_mtime - dst.st_mtime) > MTIME_TOLERANCE_SECONDS:
+        elif src.st_size != dst.st_size or not _same_mtime(src.st_mtime, dst.st_mtime):
             diffs.append(TrackDiff(rel, "changed", src.st_size, dst.st_size, src.st_mtime, dst.st_mtime))
     return diffs
 
@@ -179,12 +192,17 @@ def _copy_file(action: SyncAction, chunk_cb=None) -> None:
         copied_bytes = 0
         if chunk_cb is not None:
             chunk_cb(action, copied_bytes)
+        last_report = time.monotonic()
         while True:
             chunk = fsrc.read(_COPY_CHUNK_SIZE)
             if not chunk:
                 break
             fdst.write(chunk)
             copied_bytes += len(chunk)
-            if chunk_cb is not None:
+            # Throttled: a progress signal per chunk floods the GUI thread on fast drives.
+            if chunk_cb is not None and time.monotonic() - last_report >= _PROGRESS_INTERVAL_SECONDS:
                 chunk_cb(action, copied_bytes)
+                last_report = time.monotonic()
+        if chunk_cb is not None and copied_bytes:
+            chunk_cb(action, copied_bytes)
     shutil.copystat(action.source_path, action.dest_path)

@@ -148,3 +148,18 @@ def test_write_diff_csv(tmp_path):
     assert rows[0]["status"] == "new"
     assert rows[0]["path"] == "a.mp3"
     assert rows[0]["source_size"] == "3"
+
+
+def test_plan_sync_treats_whole_hour_mtime_shift_as_unchanged(tmp_path):
+    # FAT/exFAT sticks written under another time zone or DST offset.
+    source, dest = tmp_path / "source", tmp_path / "dest"
+    source.mkdir()
+    dest.mkdir()
+    (source / "song.mp3").write_bytes(b"hello")
+    (dest / "song.mp3").write_bytes(b"hello")
+    st = (source / "song.mp3").stat()
+    os.utime(dest / "song.mp3", (st.st_atime, st.st_mtime + 3600))
+    assert plan_sync(source, dest) == []
+
+    os.utime(dest / "song.mp3", (st.st_atime, st.st_mtime + 1800))  # not a whole-hour shift
+    assert len(plan_sync(source, dest)) == 1
