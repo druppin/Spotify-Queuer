@@ -74,10 +74,12 @@ class SettingsDialog(QDialog):
         form.addRow("Rate limit window (s)", self.window_seconds_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setProperty("primary", True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.addLayout(form)
         layout.addWidget(buttons)
 

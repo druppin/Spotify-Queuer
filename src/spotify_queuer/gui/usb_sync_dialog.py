@@ -158,6 +158,8 @@ class UsbSyncDialog(QDialog):
         self._files_done = 0
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
 
         layout.addWidget(QLabel("Source (checked for files to copy):"))
         self.source_edit, source_row = _folder_row(self)
@@ -200,6 +202,7 @@ class UsbSyncDialog(QDialog):
 
         buttons = QDialogButtonBox()
         self._copy_btn = buttons.addButton("Copy", QDialogButtonBox.AcceptRole)
+        self._copy_btn.setProperty("primary", True)
         self._copy_btn.setEnabled(False)
         self._copy_btn.clicked.connect(self._copy)
         buttons.addButton(QDialogButtonBox.Close)

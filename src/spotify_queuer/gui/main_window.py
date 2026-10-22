@@ -47,6 +47,12 @@ _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 _MAX_LOG_RECORDS = 5000
 
 
+def _heading(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setProperty("heading", True)
+    return label
+
+
 class _QueueWorker(QObject):
     """Runs Application.queue_selected_playlists() off the GUI thread.
 
@@ -123,15 +129,19 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QHBoxLayout(central)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(16)
 
         # -- left: playlist sidebar --
         left = QWidget()
-        left.setMaximumWidth(340)
+        left.setMaximumWidth(380)
         left_layout = QVBoxLayout(left)
-        left_layout.addWidget(QLabel("Your playlists"))
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
+        left_layout.addWidget(_heading("Your playlists"))
 
         self._playlist_list = QListWidget()
-        self._playlist_list.setIconSize(QSize(48, 48))
+        self._playlist_list.setIconSize(QSize(64, 64))
         self._playlist_list.itemChanged.connect(self._on_playlist_item_changed)
         left_layout.addWidget(self._playlist_list, 2)
 
@@ -139,7 +149,7 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_playlists)
         left_layout.addWidget(refresh_btn)
 
-        left_layout.addWidget(QLabel("Queue order (drag to reorder)"))
+        left_layout.addWidget(_heading("Queue order (drag to reorder)"))
         self._queue_order_list = QListWidget()
         self._queue_order_list.setDragDropMode(QAbstractItemView.InternalMove)
         left_layout.addWidget(self._queue_order_list, 1)
@@ -157,6 +167,7 @@ class MainWindow(QMainWindow):
         self._queue_btn = QPushButton("Queue Selected")
         self._queue_btn.setToolTip("Plays the queue order list now, per the checkbox above.")
         self._queue_btn.setDefault(True)
+        self._queue_btn.setProperty("primary", True)
         self._queue_btn.clicked.connect(self._queue_selected)
         left_layout.addWidget(self._queue_btn)
 
@@ -170,6 +181,8 @@ class MainWindow(QMainWindow):
         # -- right: downloads status + log --
         right = QWidget()
         right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
 
         toolbar = QHBoxLayout()
         toolbar.addStretch(1)
@@ -182,7 +195,9 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(toolbar)
 
         self._download_banner = QLabel("")
-        self._download_banner.setStyleSheet("background-color: #b00020; color: white; padding: 6px;")
+        self._download_banner.setStyleSheet(
+            "background-color: #e22134; color: white; padding: 8px 12px; border-radius: 6px;"
+        )
         self._download_banner.setWordWrap(True)
         self._download_banner.hide()
         right_layout.addWidget(self._download_banner)
@@ -191,7 +206,8 @@ class MainWindow(QMainWindow):
 
         downloads_panel = QWidget()
         downloads_layout = QVBoxLayout(downloads_panel)
-        downloads_layout.addWidget(QLabel("Recently downloaded (filed into today's playlist)"))
+        downloads_layout.setContentsMargins(0, 0, 0, 0)
+        downloads_layout.addWidget(_heading("Recently downloaded"))
         self._downloads_view = QPlainTextEdit()
         self._downloads_view.setReadOnly(True)
         self._downloads_view.setMaximumBlockCount(2000)
@@ -200,14 +216,16 @@ class MainWindow(QMainWindow):
 
         log_panel = QWidget()
         log_layout = QVBoxLayout(log_panel)
+        log_layout.setContentsMargins(0, 8, 0, 0)
         log_toolbar = QHBoxLayout()
-        log_toolbar.addWidget(QLabel("Log level:"))
+        log_toolbar.addWidget(_heading("Log"))
+        log_toolbar.addStretch(1)
+        log_toolbar.addWidget(QLabel("Level:"))
         self._log_level_combo = QComboBox()
         self._log_level_combo.addItems(_LOG_LEVELS)
         self._log_level_combo.setCurrentText("INFO")
         self._log_level_combo.currentTextChanged.connect(self._rerender_log_view)
         log_toolbar.addWidget(self._log_level_combo)
-        log_toolbar.addStretch(1)
         log_layout.addLayout(log_toolbar)
         self._log_view = QPlainTextEdit()
         self._log_view.setReadOnly(True)

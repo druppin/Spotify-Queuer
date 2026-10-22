@@ -8,12 +8,14 @@ from PySide6.QtWidgets import QApplication
 
 from .app import Application, default_config_path
 from .gui.main_window import MainWindow
+from .gui.theme import apply_theme
 
 
 def main() -> int:
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_config_path()
 
     qt_app = QApplication(sys.argv)
+    apply_theme(qt_app)
 
     application = Application(config_path)
     window = MainWindow(application)
