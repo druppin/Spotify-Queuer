@@ -25,8 +25,9 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .library_index import AUDIO_EXTENSIONS
+from .library_index import AUDIO_EXTENSIONS, read_tags
 from .m3u_writer import M3UEntry, sanitize_filename, write_playlist_m3u
+from .queue_history import QueueHistory
 
 logger = logging.getLogger("spotify_queuer.download_watcher")
 
@@ -159,6 +160,8 @@ class DownloadWatcher:
 
     on_new_file(path): called (off the GUI thread) whenever a file is filed
     into today's playlist -- wire to a GUI signal for live feedback.
+    queue_history: if given, a new file that matches a track this app queued
+    is also filed into `<source playlist name>.m3u8`.
     on_error(message): called when watching itself is degraded (folder
     missing, watcher failed to start, scan error) -- treat as urgent, not a
     routine log line, since a silent failure here is exactly the "big deal"
@@ -174,8 +177,12 @@ class DownloadWatcher:
         stable_seconds: float = DEFAULT_STABLE_SECONDS,
         on_new_file=None,
         on_error=None,
+        queue_history: QueueHistory | None = None,
+        fuzzy_threshold: int = 87,
     ):
         self.watch_dir = Path(watch_dir)
+        self._history = queue_history
+        self.fuzzy_threshold = fuzzy_threshold
         self.m3u_output_dir = Path(m3u_output_dir)
         self.fallback_rescan_seconds = fallback_rescan_seconds
         self.stable_seconds = stable_seconds
@@ -257,5 +264,26 @@ class DownloadWatcher:
                 logger.exception("Failed to write daily download playlist")
                 self._on_error(f"Failed to write '{daily_playlist_name(now)}.m3u8': {exc}")
                 return
+            if self._history is not None:
+                self._file_into_source_playlist(path)
         logger.info("New download filed: %s -> %s", path, write_path.name)
         self._on_new_file(path)
+
+    def _file_into_source_playlist(self, path: Path) -> None:
+        keys = [read_tags(path), _title_artists_from_filename(path)]
+        match = self._history.match_download(path, keys, self.fuzzy_threshold)
+        if match is None:
+            return
+        playlist_id, playlist_name = match
+        entries = [
+            M3UEntry(file_path=p, title=title, artists=artists)
+            for p, title, artists in self._history.downloads_for_playlist(playlist_id)
+            if p.exists()
+        ]
+        try:
+            write_playlist_m3u(playlist_name, entries, self.m3u_output_dir)
+        except OSError as exc:
+            logger.exception("Failed to write source playlist")
+            self._on_error(f"Failed to write '{playlist_name}.m3u8': {exc}")
+            return
+        logger.info("Download %s filed into source playlist '%s'", path.name, playlist_name)

@@ -161,3 +161,50 @@ def test_rescan_reports_error_when_folder_missing(tmp_path):
     assert len(errors) == 1
     assert "not found" in errors[0]
     watcher._seen.close()
+
+
+def _watcher_with_history(tmp_path):
+    from spotify_queuer.queue_engine import QueuedTrack
+    from spotify_queuer.queue_history import QueueHistory
+
+    history = QueueHistory(tmp_path / "history.sqlite3")
+    history.record_queued(
+        [QueuedTrack("spotify:track:a", "Song A", "Artist 1", playlist_id="p1")], {"p1": "Friday Set"}
+    )
+    watch_dir = tmp_path / "Downloads"
+    watch_dir.mkdir()
+    watcher = DownloadWatcher(
+        watch_dir=watch_dir,
+        m3u_output_dir=tmp_path / "Playlists",
+        state_db_path=tmp_path / "state.sqlite3",
+        queue_history=history,
+    )
+    return watcher, history, watch_dir
+
+
+def test_download_matching_a_queued_track_lands_in_its_source_playlist(tmp_path):
+    watcher, history, watch_dir = _watcher_with_history(tmp_path)
+    song = watch_dir / "Song A - Artist 1.mp3"
+    song.write_bytes(b"x")
+    _age_file(song, 60)
+
+    watcher.rescan_now()
+
+    named = tmp_path / "Playlists" / "Friday Set.m3u8"
+    assert named.exists() and song.name in named.read_text(encoding="utf-8")
+    assert history.blocked_uris(requeue_after_seconds=0) == {"spotify:track:a"}  # downloaded: blocked for good
+    assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))  # still in the dated playlist too
+    watcher._seen.close()
+
+
+def test_download_not_matching_any_queued_track_gets_no_named_playlist(tmp_path):
+    watcher, history, watch_dir = _watcher_with_history(tmp_path)
+    song = watch_dir / "Other Song - Someone Else.mp3"
+    song.write_bytes(b"x")
+    _age_file(song, 60)
+
+    watcher.rescan_now()
+
+    assert not (tmp_path / "Playlists" / "Friday Set.m3u8").exists()
+    assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))
+    watcher._seen.close()

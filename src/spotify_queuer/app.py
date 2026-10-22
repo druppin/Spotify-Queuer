@@ -60,6 +60,8 @@ class Application:
             fallback_rescan_seconds=self.config.download_watch.fallback_rescan_seconds,
             on_new_file=on_new_file,
             on_error=on_error,
+            queue_history=self.queue_history,
+            fuzzy_threshold=self.config.matching.fuzzy_threshold,
         )
         self.download_watcher.start()
 
