@@ -8,7 +8,7 @@ class FakeRawSpotify:
     def __init__(self, pages):
         self._pages = pages
 
-    def playlist_items(self, playlist_id, limit=100, additional_types=("track",)):
+    def playlist_items(self, playlist_id, limit=100, market=None, additional_types=("track",)):
         return self._pages[0]
 
     def next(self, results):

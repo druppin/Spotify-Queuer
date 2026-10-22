@@ -382,6 +382,7 @@ class MainWindow(QMainWindow):
             for count, label in (
                 (result.skipped_local, "already local"),
                 (result.skipped_duplicate, "duplicate"),
+                (result.skipped_unplayable, "unavailable on Spotify"),
             )
             if count
         ]

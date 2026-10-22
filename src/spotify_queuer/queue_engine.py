@@ -26,6 +26,7 @@ class QueuedTrack:
     title: str
     artists: str  # display string ("Artist A, Artist B"), used for fuzzy matching
     playlist_id: str = ""  # the selected playlist this track was collected from
+    playable: bool = True  # False when Spotify marks it unplayable in your market (e.g. pulled releases)
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class QueueResult:
     skipped_local: int
     queued: int
     skipped_duplicate: int = 0  # same track on more than one selected playlist
+    skipped_unplayable: int = 0  # Spotify won't play it for this account
     cached_playlists: int = 0  # read from the database: snapshot unchanged, no Spotify request
 
 
@@ -51,7 +53,13 @@ def _track_from_raw(raw: dict, playlist_id: str = "") -> QueuedTrack | None:
     if not raw or not raw.get("uri"):
         return None
     artists = ", ".join(a.get("name", "") for a in raw.get("artists", []) if a.get("name"))
-    return QueuedTrack(uri=raw["uri"], title=raw.get("name", "") or "", artists=artists, playlist_id=playlist_id)
+    return QueuedTrack(
+        uri=raw["uri"],
+        title=raw.get("name", "") or "",
+        artists=artists,
+        playlist_id=playlist_id,
+        playable=raw.get("is_playable") is not False,
+    )
 
 
 def collect_playlist_tracks(
@@ -75,7 +83,10 @@ def collect_playlist_tracks(
     for i, playlist_id in enumerate(playlist_ids, start=1):
         snapshot_id = snapshots.get(playlist_id)
         if catalog is not None and catalog.is_current(playlist_id, snapshot_id):
-            tracks.extend(QueuedTrack(*row, playlist_id=playlist_id) for row in catalog.cached_tracks(playlist_id))
+            tracks.extend(
+                QueuedTrack(uri, title, artists, playlist_id, bool(playable))
+                for uri, title, artists, playable in catalog.cached_tracks(playlist_id)
+            )
             continue
         if on_progress is not None:
             on_progress(f"Fetching tracks for playlist {i}/{len(playlist_ids)}...")
@@ -204,7 +215,9 @@ def run_queue(
             seen.add(track.uri)
             unique.append(track)
     skipped_duplicate = total - len(unique)
-    tracks = unique
+    # Spotify accepts these into the queue and then silently drops them, so they'd only inflate the count.
+    tracks = [t for t in unique if t.playable]
+    skipped_unplayable = len(unique) - len(tracks)
 
     skipped_local = 0
     if skip_local:
@@ -222,7 +235,8 @@ def run_queue(
     if catalog is not None and queued:
         catalog.record_queued(tracks)
     logger.info(
-        "Queued %d/%d track(s) from %d playlist(s), %d cached / %d fetched (%d already local, %d duplicate, skipped)",
+        "Queued %d/%d track(s) from %d playlist(s), %d cached / %d fetched"
+        " (%d already local, %d duplicate, %d unplayable, skipped)",
         queued,
         total,
         len(playlist_ids),
@@ -230,6 +244,7 @@ def run_queue(
         len(playlist_ids) - cached_playlists,
         skipped_local,
         skipped_duplicate,
+        skipped_unplayable,
     )
     if queued:
         verify_playback(spotify, device_name, expect_playing=interrupt_playback)
@@ -238,5 +253,6 @@ def run_queue(
         skipped_local=skipped_local,
         queued=queued,
         skipped_duplicate=skipped_duplicate,
+        skipped_unplayable=skipped_unplayable,
         cached_playlists=cached_playlists,
     )

@@ -13,7 +13,7 @@ def test_connect_creates_schema_idempotently(tmp_path):
 
 def test_deleting_a_file_cascades_its_track_link(tmp_path):
     conn = connect(tmp_path / "app.sqlite3")
-    conn.execute("INSERT INTO tracks VALUES ('a', 'spotify:track:a', 'Song', 'Artist')")
+    conn.execute("INSERT INTO tracks (id, uri, title, artists) VALUES ('a', 'spotify:track:a', 'Song', 'Artist')")
     conn.execute("INSERT INTO library_files (path, first_seen_at) VALUES ('x.mp3', 0)")
     conn.execute("INSERT INTO track_files VALUES ('a', 'x.mp3', 'match', 90, 0)")
     conn.execute("DELETE FROM library_files WHERE path = 'x.mp3'")
@@ -61,3 +61,19 @@ def test_ensure_migrated_imports_legacy_databases_once(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM queue_events").fetchone()[0] == 2
     assert conn.execute("SELECT track_id, path, source FROM track_files").fetchall() == [("x", dl_path, "download")]
     assert conn.execute("SELECT name, snapshot_id FROM playlists").fetchall() == [("Friday Set", None)]
+
+
+def test_connect_adds_playability_to_an_older_database_and_forces_a_refetch(tmp_path):
+    db = tmp_path / "app.sqlite3"
+    old = sqlite3.connect(str(db))
+    old.executescript(
+        "CREATE TABLE tracks (id TEXT PRIMARY KEY, uri TEXT NOT NULL UNIQUE, title TEXT NOT NULL, artists TEXT NOT NULL);"
+        "CREATE TABLE playlists (id TEXT PRIMARY KEY, name TEXT NOT NULL, snapshot_id TEXT, fetched_at REAL);"
+        "INSERT INTO playlists VALUES ('p1', 'Mix', 'snap', 0);"
+    )
+    old.commit()
+    old.close()
+
+    conn = connect(db)
+    assert "is_playable" in {r[1] for r in conn.execute("PRAGMA table_info(tracks)")}
+    assert conn.execute("SELECT snapshot_id FROM playlists").fetchone() == (None,)

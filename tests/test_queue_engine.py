@@ -295,3 +295,16 @@ def test_verify_playback_accepts_paused_device_when_appending():
     spotify = FakeSpotify()
     spotify.playback_state = {"is_playing": False, "device": {"id": "dev1", "name": "My PC"}, "item": {"uri": "x"}}
     verify_playback(spotify, "My PC", expect_playing=False)  # paused on purpose; tracks wait behind
+
+
+def test_run_queue_skips_tracks_spotify_marks_unplayable_fresh_and_cached(tmp_path):
+    spotify, library, catalog = _queue_setup(tmp_path)
+    pulled = make_track("z", "36", ["Redlight"])
+    pulled["is_playable"] = False
+    spotify.playlists["p1"].append(pulled)
+
+    for _ in range(2):  # first run fetches, second reads the cached copy
+        result = _run(spotify, library, catalog, ["p1"], snapshots={"p1": "s1"})
+        assert result.skipped_unplayable == 1
+        assert "spotify:track:z" not in spotify.queued_uris
+    assert result.cached_playlists == 1

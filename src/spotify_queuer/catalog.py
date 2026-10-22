@@ -52,12 +52,13 @@ class Catalog:
             row = self._conn.execute("SELECT snapshot_id FROM playlists WHERE id = ?", (playlist_id,)).fetchone()
         return row is not None and row[0] == snapshot_id
 
-    def cached_tracks(self, playlist_id: str) -> list[tuple[str, str, str]]:
-        """(uri, title, artists) in playlist order."""
+    def cached_tracks(self, playlist_id: str) -> list[tuple[str, str, str, bool]]:
+        """(uri, title, artists, playable) in playlist order."""
         with self._lock:
             return self._conn.execute(
                 """
-                SELECT t.uri, t.title, t.artists FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
+                SELECT t.uri, t.title, t.artists, COALESCE(t.is_playable, 1) = 1
+                FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
                 WHERE pt.playlist_id = ? ORDER BY pt.position
                 """,
                 (playlist_id,),
@@ -81,10 +82,11 @@ class Catalog:
     def _upsert_tracks(self, tracks) -> None:
         self._conn.executemany(
             """
-            INSERT INTO tracks (id, uri, title, artists) VALUES (?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET title = excluded.title, artists = excluded.artists
+            INSERT INTO tracks (id, uri, title, artists, is_playable) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title, artists = excluded.artists, is_playable = excluded.is_playable
             """,
-            [(track_id_for_uri(t.uri), t.uri, t.title, t.artists) for t in tracks],
+            [(track_id_for_uri(t.uri), t.uri, t.title, t.artists, int(t.playable)) for t in tracks],
         )
 
     # -- track <-> local file links --

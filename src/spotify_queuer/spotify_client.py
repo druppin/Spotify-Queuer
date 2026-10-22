@@ -96,7 +96,10 @@ class SpotifyClient:
         """Paginate fully (100/page) before diffing -- a partial page reads as a mass
         removal to the prune feature (§5)."""
         items: list[dict] = []
-        results = self._call(self._sp.playlist_items, playlist_id, limit=100, additional_types=("track",))
+        # market=from_token makes Spotify flag tracks it won't play for this account (is_playable).
+        results = self._call(
+            self._sp.playlist_items, playlist_id, limit=100, market="from_token", additional_types=("track",)
+        )
         items.extend(results["items"])
         while results.get("next"):
             results = self._call(self._sp.next, results)

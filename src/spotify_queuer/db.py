@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     id      TEXT PRIMARY KEY,         -- Spotify track id
     uri     TEXT NOT NULL UNIQUE,
     title   TEXT NOT NULL,
-    artists TEXT NOT NULL
+    artists TEXT NOT NULL,
+    is_playable INTEGER               -- 0 = Spotify won't play it in your market; NULL = unknown
 );
 CREATE TABLE IF NOT EXISTS playlist_tracks (
     playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
@@ -102,6 +103,11 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
+    if "is_playable" not in {row[1] for row in conn.execute("PRAGMA table_info(tracks)")}:
+        with conn:
+            conn.execute("ALTER TABLE tracks ADD COLUMN is_playable INTEGER")
+            # Cached track lists predate playability: refetch each playlist once.
+            conn.execute("UPDATE playlists SET snapshot_id = NULL")
     return conn
 
 
