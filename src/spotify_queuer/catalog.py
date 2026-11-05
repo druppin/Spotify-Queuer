@@ -110,6 +110,15 @@ class Catalog:
             )
             return cur.rowcount > 0
 
+    def downloaded_uri(self, path: Path | str) -> str | None:
+        """The track this file was linked to as a download, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT t.uri FROM track_files f JOIN tracks t ON t.id = f.track_id WHERE f.path = ? AND f.source = 'download'",
+                (norm_path(path),),
+            ).fetchone()
+        return row[0] if row else None
+
     def playlists_containing(self, uri: str) -> list[str]:
         with self._lock:
             rows = self._conn.execute(

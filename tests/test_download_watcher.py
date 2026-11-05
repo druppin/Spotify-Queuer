@@ -27,6 +27,20 @@ def test_seen_files_mark_if_new_dedupes_unchanged_files(tmp_path):
     seen.close()
 
 
+def test_seen_files_ignores_a_dst_clock_change_shift(tmp_path):
+    seen = SeenFiles(tmp_path / "seen.sqlite3")
+    p = tmp_path / "song.mp3"
+    p.write_bytes(b"data")
+    today = date(2026, 11, 5)
+
+    assert seen.mark_if_new(p, 4, 100.0, today) is True
+    assert seen.mark_if_new(p, 4, 3700.0, today) is False  # FAT32 after a DST change: same file
+    assert seen.mark_if_new(p, 4, 3700.0, today) is False  # the shifted mtime was remembered
+    assert seen.mark_if_new(p, 4, 5000.0, today) is True  # moved by other than an hour: a real change
+    assert seen.mark_if_new(p, 5, 3701.0, today) is True  # an hour off but a different size: changed
+    seen.close()
+
+
 def test_rewrite_daily_playlist_writes_m3u_for_todays_files(tmp_path):
     downloads = tmp_path / "Downloads"
     downloads.mkdir()
@@ -211,4 +225,135 @@ def test_download_not_matching_any_queued_track_gets_no_named_playlist(tmp_path)
 
     assert not (tmp_path / "Playlists" / "Friday Set.m3u8").exists()
     assert list((tmp_path / "Playlists").glob("recently downloaded*.m3u8"))
+    watcher._seen.close()
+
+
+# -- SPOTIFY_ID tagging (cratesync) --
+
+FIXTURES = Path(__file__).parent / "fixtures"
+TRACK_ID = "4uLU6hMCjMI75M1A2tKUQC"
+
+
+def _tagging_watcher(tmp_path):
+    """Watcher with one queued track (real-length ID) and no stability wait, so a
+    second pass sees exactly the size/mtime the first pass left behind."""
+    from spotify_queuer.catalog import Catalog
+    from spotify_queuer.queue_engine import QueuedTrack
+
+    db = tmp_path / "app.sqlite3"
+    catalog = Catalog(db)
+    catalog.record_queued([QueuedTrack(f"spotify:track:{TRACK_ID}", "Song A", "Artist 1")])
+    watch_dir = tmp_path / "Downloads"
+    watch_dir.mkdir()
+    filed = []
+    watcher = DownloadWatcher(
+        watch_dir=watch_dir,
+        m3u_output_dir=tmp_path / "Playlists",
+        state_db_path=db,
+        catalog=catalog,
+        stable_seconds=0,
+        on_new_file=filed.append,
+    )
+    return watcher, watch_dir, filed
+
+
+def _download(watch_dir, name, fixture="sample.mp3"):
+    import shutil
+
+    return Path(shutil.copy(FIXTURES / fixture, watch_dir / name))
+
+
+def test_download_matching_a_queued_track_gets_its_spotify_id_and_is_not_refiled(tmp_path):
+    from spotify_queuer.ids import read_id
+
+    watcher, watch_dir, filed = _tagging_watcher(tmp_path)
+    song = _download(watch_dir, "Song A - Artist 1.mp3")
+
+    watcher.rescan_now()
+    watcher.rescan_now()  # the tag write changed size/mtime; that must not look like a new download
+
+    assert read_id(song) == TRACK_ID
+    assert filed == [song]
+    assert not list(watch_dir.glob(".cratesync-*"))
+    watcher._seen.close()
+
+
+def test_download_matching_nothing_stays_untagged_and_is_reported(tmp_path, caplog):
+    from spotify_queuer.ids import read_id
+
+    watcher, watch_dir, _ = _tagging_watcher(tmp_path)
+    song = _download(watch_dir, "Other Song - Someone Else.mp3")
+
+    watcher.rescan_now()
+
+    assert read_id(song) is None
+    assert "not tagged with SPOTIFY_ID: Other Song - Someone Else.mp3" in caplog.text
+    watcher._seen.close()
+
+
+def test_download_already_tagged_is_left_alone(tmp_path):
+    from spotify_queuer.ids import write_id
+
+    watcher, watch_dir, _ = _tagging_watcher(tmp_path)
+    song = _download(watch_dir, "Song A - Artist 1.mp3")
+    write_id(song, "0pwObEOHolQZSldJ2q1wpy")
+    before = song.read_bytes()
+
+    watcher.rescan_now()
+
+    assert song.read_bytes() == before
+    watcher._seen.close()
+
+
+def test_cratesync_temp_files_are_never_filed(tmp_path):
+    from watchdog.events import FileCreatedEvent
+
+    from spotify_queuer.download_watcher import _Handler
+
+    watcher, watch_dir, filed = _tagging_watcher(tmp_path)
+    temp = _download(watch_dir, ".cratesync-abc123.mp3")
+    checked = []
+
+    watcher.rescan_now()
+    _Handler(checked.append).on_created(FileCreatedEvent(str(temp)))
+
+    assert filed == [] and checked == []
+    watcher._seen.close()
+
+
+def test_second_download_of_one_queued_track_is_reported_not_tagged(tmp_path, caplog):
+    from spotify_queuer.ids import read_id
+
+    watcher, watch_dir, _ = _tagging_watcher(tmp_path)
+    first = _download(watch_dir, "Song A - Artist 1.mp3")
+    watcher.rescan_now()
+    second = _download(watch_dir, "Song A - Artist 1 (1).mp3")
+
+    watcher.rescan_now()
+
+    assert read_id(first) == TRACK_ID
+    assert read_id(second) is None
+    assert "not tagged with SPOTIFY_ID: Song A - Artist 1 (1).mp3" in caplog.text
+    watcher._seen.close()
+
+
+def test_download_without_ripper_tags_yet_is_tagged_once_they_land(tmp_path):
+    from mutagen.id3 import TIT2
+    from mutagen.wave import WAVE
+
+    from spotify_queuer.ids import read_id
+
+    watcher, watch_dir, _ = _tagging_watcher(tmp_path)
+    song = _download(watch_dir, "Song A - Artist 1.wav", fixture="sample.wav")  # no tags at all
+
+    watcher.rescan_now()
+    assert read_id(song) is None  # linked by filename, but the ripper may still be writing
+
+    audio = WAVE(song)  # the ripper's tag write
+    audio.add_tags()
+    audio.tags.add(TIT2(encoding=3, text=["Song A"]))
+    audio.save()
+    watcher.rescan_now()
+
+    assert read_id(song) == TRACK_ID
     watcher._seen.close()

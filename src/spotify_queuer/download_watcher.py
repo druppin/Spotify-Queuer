@@ -21,11 +21,14 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from mutagen import File as MutagenFile
+from mutagen import MutagenError
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .catalog import Catalog, rewrite_playlist_files
+from .catalog import Catalog, rewrite_playlist_files, track_id_for_uri
 from .db import connect, norm_path
+from .ids import read_id, write_id
 from .library_index import AUDIO_EXTENSIONS, read_tags
 from .m3u_writer import M3UEntry, sanitize_filename, write_playlist_m3u
 
@@ -33,6 +36,23 @@ logger = logging.getLogger("spotify_queuer.download_watcher")
 
 DAILY_PLAYLIST_PREFIX = "recently downloaded"
 DEFAULT_STABLE_SECONDS = 5.0
+TEMP_PREFIX = ".cratesync-"  # ids.write_id's temp copies; never downloads
+
+
+def _is_download(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTENSIONS and not path.name.startswith(TEMP_PREFIX)
+
+
+def _clock_change_shift(old_mtime: float | None, new_mtime: float) -> bool:
+    """FAT32 (e.g. the G: USB stick) stores local time, so after every DST change
+    Windows reports each file's mtime exactly an hour off. 2 s = FAT's resolution."""
+    return old_mtime is not None and abs(abs(new_mtime - old_mtime) - 3600) <= 2
+
+
+def _has_title(path: Path) -> bool:
+    # Raw frames, not read_tags(): mutagen's easy mode can't see a WAV's ID3 title.
+    tags = MutagenFile(path).tags
+    return bool(tags and (tags.get("TIT2") or tags.get("\xa9nam")))
 
 
 def daily_playlist_name(moment: datetime) -> str:
@@ -80,6 +100,12 @@ class SeenFiles:
                 "SELECT seen_size, seen_mtime FROM library_files WHERE path = ?", (key,)
             ).fetchone()
             if row is not None and row[0] == size and row[1] == mtime:
+                return False
+            if row is not None and row[0] == size and _clock_change_shift(row[1], mtime):
+                # Same file, reported an hour off after a DST change; remember the new
+                # mtime so later checks compare exactly again.
+                with self._conn:
+                    self._conn.execute("UPDATE library_files SET seen_mtime = ? WHERE path = ?", (mtime, key))
                 return False
             first_seen = row is None or row[0] is None
             with self._conn:
@@ -157,7 +183,7 @@ class _Handler(FileSystemEventHandler):
         if is_directory:
             return
         path = Path(raw_path)
-        if path.suffix.lower() in AUDIO_EXTENSIONS:
+        if _is_download(path):
             self._check_fn(path)
 
 
@@ -245,9 +271,7 @@ class DownloadWatcher:
             self._on_error(f"Downloads folder not found: {self.watch_dir}")
             return
         try:
-            candidates = [
-                p for p in self.watch_dir.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
-            ]
+            candidates = [p for p in self.watch_dir.rglob("*") if p.is_file() and _is_download(p)]
         except OSError as exc:
             logger.exception("Error scanning downloads folder")
             self._on_error(f"Error scanning downloads folder: {exc}")
@@ -257,15 +281,17 @@ class DownloadWatcher:
         self._after_rescan()
 
     def _check_and_file(self, path: Path) -> None:
-        try:
-            stat = path.stat()
-        except OSError:
-            return  # vanished between listing and stat; a later pass will catch it if it's still there
-        if time.time() - stat.st_mtime < self.stable_seconds:
-            return  # still being written -- re-checked on the next event or rescan
-        now = datetime.now()
-        today = now.date()
+        # stat under the lock: a pass that waited here while another tagged this file
+        # must see the tagged size/mtime, or it re-files the file as new.
         with self._lock:
+            try:
+                stat = path.stat()
+            except OSError:
+                return  # vanished between listing and stat; a later pass will catch it if it's still there
+            if time.time() - stat.st_mtime < self.stable_seconds:
+                return  # still being written -- re-checked on the next event or rescan
+            now = datetime.now()
+            today = now.date()
             if not self._seen.mark_if_new(path, stat.st_size, stat.st_mtime, today):
                 return
             try:
@@ -280,9 +306,15 @@ class DownloadWatcher:
         self._on_new_file(path)
 
     def _file_into_source_playlists(self, path: Path) -> None:
-        keys = [read_tags(path), _title_artists_from_filename(path)]
-        uri = self._catalog.match_download(path.resolve(), keys, self.fuzzy_threshold)
+        # A file already linked is being re-checked because it changed (e.g. the
+        # ripper wrote its tags late); it keeps its track and only needs tagging.
+        uri = self._catalog.downloaded_uri(path.resolve())
+        already_linked = uri is not None
         if uri is None:
+            keys = [read_tags(path), _title_artists_from_filename(path)]
+            uri = self._catalog.match_download(path.resolve(), keys, self.fuzzy_threshold)
+        self._tag_download(path, uri)
+        if uri is None or already_linked:
             return
         playlist_ids = self._catalog.playlists_containing(uri)
         try:
@@ -292,3 +324,30 @@ class DownloadWatcher:
             self._on_error(f"Failed to write source playlist for {path.name}: {exc}")
             return
         logger.info("Download %s linked to %s; rewrote %d playlist file(s)", path.name, uri, len(playlist_ids))
+
+    def _tag_download(self, path: Path, uri: str | None) -> None:
+        """Write the queued track's SPOTIFY_ID into a new download; cratesync
+        identifies every file by it. Never guesses: anything uncertain is logged
+        and left untagged (cratesync's backfill can pick it up later)."""
+        try:
+            if read_id(path):
+                return  # already identified; leave it alone
+            if uri is None:
+                logger.warning(
+                    "Download not tagged with SPOTIFY_ID: %s matches no queued track without a file", path.name
+                )
+                return
+            if not _has_title(path):
+                # The ripper writes tags after recording; tagging now could race it.
+                # Its tag write changes the file, which brings it back here.
+                logger.info("Download %s has no title tag yet; tagging it once the ripper's tags land", path.name)
+                return
+            write_id(path, track_id_for_uri(uri))
+            stat = path.stat()
+        except (ValueError, OSError, MutagenError) as exc:
+            # shortcut: not retried until the file changes again; a backfill rerun catches these.
+            logger.warning("Download not tagged with SPOTIFY_ID: %s: %s", path.name, exc)
+            return
+        # Record the tagged file's new size/mtime, or the next pass would file it as a new download.
+        self._seen.mark_if_new(path, stat.st_size, stat.st_mtime, date.today())
+        logger.info("Tagged %s with SPOTIFY_ID %s", path.name, track_id_for_uri(uri))
