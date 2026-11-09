@@ -70,6 +70,14 @@ class MatchingConfig:
 
 
 @dataclasses.dataclass
+class CratesyncConfig:
+    """cratesync's download-queue API; "Send missing to download queue" is off while either is empty."""
+
+    api_url: str = ""
+    api_token: str = ""
+
+
+@dataclasses.dataclass
 class AppConfig:
     spotify: SpotifyConfig = dataclasses.field(default_factory=SpotifyConfig)
     queue: QueueConfig = dataclasses.field(default_factory=QueueConfig)
@@ -77,6 +85,7 @@ class AppConfig:
     download_watch: DownloadWatchConfig = dataclasses.field(default_factory=DownloadWatchConfig)
     paths: PathsConfig = dataclasses.field(default_factory=PathsConfig)
     matching: MatchingConfig = dataclasses.field(default_factory=MatchingConfig)
+    cratesync: CratesyncConfig = dataclasses.field(default_factory=CratesyncConfig)
 
     @classmethod
     def load(cls, path: Path) -> "AppConfig":
@@ -99,6 +108,7 @@ class AppConfig:
             download_watch=_from_known_fields(DownloadWatchConfig, data.get("download_watch", {})),
             paths=_from_known_fields(PathsConfig, data.get("paths", {})),
             matching=_from_known_fields(MatchingConfig, data.get("matching", {})),
+            cratesync=_from_known_fields(CratesyncConfig, data.get("cratesync", {})),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,6 +119,7 @@ class AppConfig:
             "download_watch": dataclasses.asdict(self.download_watch),
             "paths": dataclasses.asdict(self.paths),
             "matching": dataclasses.asdict(self.matching),
+            "cratesync": dataclasses.asdict(self.cratesync),
         }
 
     def save(self, path: Path) -> None:

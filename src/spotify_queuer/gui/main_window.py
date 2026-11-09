@@ -54,7 +54,7 @@ def _heading(text: str) -> QLabel:
 
 
 class _QueueWorker(QObject):
-    """Runs Application.queue_selected_playlists() off the GUI thread.
+    """Runs a queue/send job (`job(on_progress)`) off the GUI thread.
 
     Queuing makes one Spotify request per track when appending behind
     current playback, so a big playlist can take a while -- doing this
@@ -63,28 +63,22 @@ class _QueueWorker(QObject):
     """
 
     progress = Signal(str)
-    finished = Signal(object)  # QueueResult
+    finished = Signal(object)  # whatever the job returns (QueueResult / SendResult)
     failed = Signal(str)
 
-    def __init__(self, app: Application, playlist_ids: list[str], interrupt_override: bool | None):
+    def __init__(self, job):
         super().__init__()
-        self._app = app
-        self._playlist_ids = playlist_ids
-        self._interrupt_override = interrupt_override
+        self._job = job
 
     def run(self) -> None:
         try:
-            result = self._app.queue_selected_playlists(
-                self._playlist_ids,
-                interrupt_playback=self._interrupt_override,
-                on_progress=self.progress.emit,
-            )
+            result = self._job(self.progress.emit)
         except (DeviceNotFoundError, PlaybackNotStartedError) as exc:
             self.failed.emit(str(exc))
             return
         except Exception:
-            logger.exception("Failed to queue playlists")
-            self.failed.emit("Failed to queue playlists; see error log.")
+            logger.exception("Background queue/send job failed")
+            self.failed.emit("Failed; see the error log.")
             return
         self.finished.emit(result)
 
@@ -161,7 +155,10 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self._interrupt_checkbox)
 
         self._queue_btn = QPushButton("Queue Selected")
-        self._queue_btn.setToolTip("Plays the queue order list now, per the checkbox above.")
+        self._queue_btn.setToolTip(
+            "Plays the queue order list now, per the checkbox above. The cratesync download "
+            "worker may also be using Spotify, so don't run both at once."
+        )
         self._queue_btn.setDefault(True)
         self._queue_btn.setProperty("primary", True)
         self._queue_btn.clicked.connect(self._queue_selected)
@@ -171,6 +168,14 @@ class MainWindow(QMainWindow):
         self._add_after_btn.setToolTip("Always appends behind what's already playing -- never interrupts it.")
         self._add_after_btn.clicked.connect(lambda: self._queue_selected(interrupt_override=False))
         left_layout.addWidget(self._add_after_btn)
+
+        self._send_btn = QPushButton("Send missing to download queue")
+        self._send_btn.setToolTip(
+            "Sends each track you don't have locally to cratesync's download queue. Doesn't play anything here."
+        )
+        self._send_btn.clicked.connect(self._send_missing)
+        left_layout.addWidget(self._send_btn)
+        self._update_send_enabled()
 
         outer.addWidget(left)
 
@@ -327,14 +332,36 @@ class MainWindow(QMainWindow):
         (alphabetical) order playlists happen to appear in the sidebar."""
         return [self._queue_order_list.item(i).data(Qt.UserRole) for i in range(self._queue_order_list.count())]
 
+    def _update_send_enabled(self) -> None:
+        cfg = self._app.config.cratesync
+        self._send_btn.setEnabled(bool(cfg.api_url and cfg.api_token))
+
     def _queue_selected(self, interrupt_override: bool | None = None) -> None:
         playlist_ids = self._selected_playlist_ids()
         if not playlist_ids:
             QMessageBox.information(self, "Spotify Queuer", "Check at least one playlist first.")
             return
+        self._run_in_background(
+            lambda on_progress: self._app.queue_selected_playlists(
+                playlist_ids, interrupt_playback=interrupt_override, on_progress=on_progress
+            ),
+            self._on_queue_finished,
+        )
 
+    def _send_missing(self) -> None:
+        playlist_ids = self._selected_playlist_ids()
+        if not playlist_ids:
+            QMessageBox.information(self, "Spotify Queuer", "Check at least one playlist first.")
+            return
+        self._run_in_background(
+            lambda on_progress: self._app.send_missing_to_download_queue(playlist_ids, on_progress=on_progress),
+            self._on_send_finished,
+        )
+
+    def _run_in_background(self, job, on_finished) -> None:
         self._queue_btn.setEnabled(False)
         self._add_after_btn.setEnabled(False)
+        self._send_btn.setEnabled(False)
 
         progress = QProgressDialog("Starting...", None, 0, 0, self)  # indeterminate -- track count isn't known yet
         progress.setWindowTitle("Spotify Queuer")
@@ -345,7 +372,7 @@ class MainWindow(QMainWindow):
         progress.show()
 
         thread = QThread(self)
-        worker = _QueueWorker(self._app, playlist_ids, interrupt_override)
+        worker = _QueueWorker(job)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         # Worker signals must go to methods of a GUI-thread QObject (self /
@@ -353,7 +380,7 @@ class MainWindow(QMainWindow):
         # thread, and building a QMessageBox there floods "setParent: new
         # parent is in a different thread" and can crash.
         worker.progress.connect(progress.setLabelText)
-        worker.finished.connect(self._on_queue_finished)
+        worker.finished.connect(on_finished)
         worker.failed.connect(self._on_queue_failed)
 
         # Kept as attributes so the thread/worker aren't garbage-collected mid-run.
@@ -373,6 +400,7 @@ class MainWindow(QMainWindow):
         self._queue_worker = None
         self._queue_btn.setEnabled(True)
         self._add_after_btn.setEnabled(True)
+        self._update_send_enabled()
 
     def _on_queue_finished(self, result) -> None:
         self._finish_queue_run()
@@ -388,7 +416,19 @@ class MainWindow(QMainWindow):
         ]
         if skipped:
             message += f" (Skipped: {', '.join(skipped)}.)"
+        message += "\n\nThe cratesync download worker may also be using Spotify; don't run both at once."
         QMessageBox.information(self, "Spotify Queuer", message)
+
+    def _on_send_finished(self, result) -> None:
+        self._finish_queue_run()
+        message = (
+            f"Sent {result.sent}, already known {result.already_known}, failed {result.failed}"
+            f" ({result.skipped_local} already local)."
+        )
+        if result.failed:
+            QMessageBox.warning(self, "Spotify Queuer", f"{message}\n\nFirst error: {result.first_error}")
+        else:
+            QMessageBox.information(self, "Spotify Queuer", message)
 
     def _on_queue_failed(self, message: str) -> None:
         self._finish_queue_run()
@@ -407,6 +447,7 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             dialog.apply_to(self._app.config)
             self._app.save_config()
+            self._update_send_enabled()
             self._app.restart_download_watcher(
                 on_new_file=lambda path: self._bridge.download_new_file.emit(str(path)),
                 on_error=lambda message: self._bridge.download_error.emit(message),

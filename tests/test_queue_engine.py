@@ -308,3 +308,92 @@ def test_run_queue_skips_tracks_spotify_marks_unplayable_fresh_and_cached(tmp_pa
         assert result.skipped_unplayable == 1
         assert "spotify:track:z" not in spotify.queued_uris
     assert result.cached_playlists == 1
+
+
+# -- cratesync download queue --
+
+
+class FakePost:
+    """Stands in for post_job: records each call and answers from `responses`
+    (an int status, or an exception to raise), defaulting to 200."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, api_url, api_token, body):
+        self.calls.append((api_url, api_token, body))
+        response = self.responses.pop(0) if self.responses else 200
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _send(tmp_path, post, tracks):
+    from spotify_queuer.queue_engine import send_missing_to_cratesync
+
+    spotify = FakeSpotify()
+    spotify.playlists = {"p1": tracks}
+    library = LibraryIndex(tmp_path)
+    library.rescan()
+    return send_missing_to_cratesync(spotify, library, ["p1"], 87, "http://pe1950:8000", "tok", post=post)
+
+
+def test_send_missing_posts_one_job_per_track_with_bearer_token(tmp_path):
+    post = FakePost()
+    result = _send(tmp_path, post, [make_track("a", "Song A", ["Artist 1", "Artist 2"]), make_track("b", "Song B", ["Artist 3"])])
+
+    assert (result.sent, result.already_known, result.failed) == (2, 0, 0)
+    assert post.calls == [
+        ("http://pe1950:8000", "tok", {"kind": "download", "spotify_url": "spotify:track:a", "artist": "Artist 1, Artist 2", "title": "Song A"}),
+        ("http://pe1950:8000", "tok", {"kind": "download", "spotify_url": "spotify:track:b", "artist": "Artist 3", "title": "Song B"}),
+    ]
+
+
+def test_send_missing_counts_409_as_already_known(tmp_path):
+    result = _send(tmp_path, FakePost(409), [make_track("a", "Song A", ["Artist 1"])])
+
+    assert (result.sent, result.already_known, result.failed) == (0, 1, 0)
+
+
+def test_send_missing_keeps_going_after_failures(tmp_path):
+    post = FakePost(500, OSError("connection refused"))
+    result = _send(
+        tmp_path, post,
+        [make_track("a", "A", ["X"]), make_track("b", "B", ["X"]), make_track("c", "C", ["X"])],
+    )
+
+    assert (result.sent, result.already_known, result.failed) == (1, 0, 2)
+    assert result.first_error == "HTTP 500"
+    assert len(post.calls) == 3
+
+
+def test_send_missing_never_sends_local_tracks(tmp_path):
+    (tmp_path / "Artist 1" / "Album").mkdir(parents=True)
+    (tmp_path / "Artist 1" / "Album" / "Song A - Artist 1.mp3").write_bytes(b"x")
+    post = FakePost()
+    result = _send(tmp_path, post, [make_track("a", "Song A", ["Artist 1"]), make_track("b", "Song B", ["Artist 2"])])
+
+    assert [body["spotify_url"] for _, _, body in post.calls] == ["spotify:track:b"]
+    assert result.skipped_local == 1
+
+
+def test_post_job_sends_bearer_token_and_returns_http_status(monkeypatch):
+    import io
+    import json
+    import urllib.error
+    import urllib.request
+
+    from spotify_queuer.queue_engine import post_job
+
+    seen = []
+
+    def fake_urlopen(request, timeout):
+        seen.append(request)
+        raise urllib.error.HTTPError(request.full_url, 409, "Conflict", {}, io.BytesIO())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert post_job("http://pe1950:8000/", "tok", {"kind": "download"}) == 409
+    assert seen[0].full_url == "http://pe1950:8000/jobs"
+    assert seen[0].get_header("Authorization") == "Bearer tok"
+    assert json.loads(seen[0].data) == {"kind": "download"}

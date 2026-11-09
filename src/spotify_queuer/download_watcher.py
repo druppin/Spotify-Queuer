@@ -213,6 +213,7 @@ class DownloadWatcher:
         catalog: Catalog | None = None,
         fuzzy_threshold: int = 87,
         after_rescan=None,
+        worker_tag_wait_seconds: float = 60,
     ):
         self.watch_dir = Path(watch_dir)
         self._catalog = catalog
@@ -228,6 +229,10 @@ class DownloadWatcher:
         self._stop_event = threading.Event()
         self._rescan_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # cratesync's worker tags its own rips ~15 s after they finish, so an unmatched
+        # download is only reported if it still has no SPOTIFY_ID after this wait.
+        self.worker_tag_wait_seconds = worker_tag_wait_seconds
+        self._pending_reports: list[threading.Timer] = []
 
     def start(self) -> None:
         self._stop_event.clear()
@@ -253,6 +258,9 @@ class DownloadWatcher:
 
     def stop(self) -> None:
         self._stop_event.set()
+        for timer in self._pending_reports:
+            timer.cancel()
+        self._pending_reports.clear()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join(timeout=5)
@@ -333,9 +341,10 @@ class DownloadWatcher:
             if read_id(path):
                 return  # already identified; leave it alone
             if uri is None:
-                logger.warning(
-                    "Download not tagged with SPOTIFY_ID: %s matches no queued track without a file", path.name
-                )
+                timer = threading.Timer(self.worker_tag_wait_seconds, self._report_if_still_untagged, [path])
+                timer.daemon = True
+                self._pending_reports = [t for t in self._pending_reports if t.is_alive()] + [timer]
+                timer.start()
                 return
             if not _has_title(path):
                 # The ripper writes tags after recording; tagging now could race it.
@@ -351,3 +360,11 @@ class DownloadWatcher:
         # Record the tagged file's new size/mtime, or the next pass would file it as a new download.
         self._seen.mark_if_new(path, stat.st_size, stat.st_mtime, date.today())
         logger.info("Tagged %s with SPOTIFY_ID %s", path.name, track_id_for_uri(uri))
+
+    def _report_if_still_untagged(self, path: Path) -> None:
+        try:
+            if read_id(path):
+                return  # cratesync's worker tagged it
+        except (ValueError, OSError, MutagenError):
+            pass  # unreadable now (moved, deleted): still worth reporting
+        logger.warning("Download not tagged with SPOTIFY_ID: %s matches no queued track without a file", path.name)

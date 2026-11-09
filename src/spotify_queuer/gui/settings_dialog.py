@@ -95,6 +95,14 @@ class SettingsDialog(QDialog):
         self.window_seconds_spin = _spin(1, 86400, config.rate_limit.window_seconds)
         form.addRow("Rate limit window (s)", self.window_seconds_spin)
 
+        self.cratesync_url_edit = QLineEdit(config.cratesync.api_url)
+        self.cratesync_url_edit.setPlaceholderText("e.g. http://pe1950:8000")
+        form.addRow("cratesync API URL", self.cratesync_url_edit)
+
+        self.cratesync_token_edit = QLineEdit(config.cratesync.api_token)
+        self.cratesync_token_edit.setEchoMode(QLineEdit.Password)
+        form.addRow("cratesync API token", self.cratesync_token_edit)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setProperty("primary", True)
         buttons.accepted.connect(self.accept)
@@ -115,3 +123,5 @@ class SettingsDialog(QDialog):
         config.matching.fuzzy_threshold = self.fuzzy_threshold_spin.value()
         config.rate_limit.max_requests = self.max_requests_spin.value()
         config.rate_limit.window_seconds = self.window_seconds_spin.value()
+        config.cratesync.api_url = self.cratesync_url_edit.text().strip()
+        config.cratesync.api_token = self.cratesync_token_edit.text().strip()

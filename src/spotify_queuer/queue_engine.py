@@ -9,8 +9,11 @@ add-to-queue both work on the same device), so it isn't used.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 from .catalog import Catalog
@@ -37,6 +40,17 @@ class QueueResult:
     skipped_duplicate: int = 0  # same track on more than one selected playlist
     skipped_unplayable: int = 0  # Spotify won't play it for this account
     cached_playlists: int = 0  # read from the database: snapshot unchanged, no Spotify request
+
+
+@dataclass(frozen=True)
+class SendResult:
+    """Outcome of sending missing tracks to cratesync's download queue."""
+
+    sent: int
+    already_known: int  # cratesync answered 409: it already has the track or a job for it
+    failed: int
+    first_error: str = ""
+    skipped_local: int = 0
 
 
 class DeviceNotFoundError(RuntimeError):
@@ -188,6 +202,83 @@ def verify_playback(
     )
 
 
+def _unique_playable(tracks: list[QueuedTrack]) -> tuple[list[QueuedTrack], int, int]:
+    """(tracks, duplicates dropped, unplayable dropped)."""
+    # First occurrence wins, so a track on two playlists belongs to the earlier one in queue order.
+    seen: set[str] = set()
+    unique = []
+    for track in tracks:
+        if track.uri not in seen:
+            seen.add(track.uri)
+            unique.append(track)
+    # Spotify accepts these into the queue and then silently drops them, so they'd only inflate the count.
+    playable = [t for t in unique if t.playable]
+    return playable, len(tracks) - len(unique), len(unique) - len(playable)
+
+
+def post_job(api_url: str, api_token: str, body: dict, timeout: float = 15) -> int:
+    """POST one job to cratesync; returns the HTTP status. Connection errors raise OSError."""
+    request = urllib.request.Request(
+        f"{api_url.rstrip('/')}/jobs",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {api_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def send_missing_to_cratesync(
+    spotify: SpotifyClient,
+    library: LibraryIndex,
+    playlist_ids: list[str],
+    fuzzy_threshold: int,
+    api_url: str,
+    api_token: str,
+    on_progress=None,
+    catalog: Catalog | None = None,
+    snapshots: dict[str, str] | None = None,
+    library_max_age_seconds: float = 300,
+    post=post_job,
+) -> SendResult:
+    """Send one cratesync download job per selected track not already in the
+    local library. Never touches playback: cratesync's worker plays and rips them."""
+    tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress, catalog=catalog, snapshots=snapshots)
+    tracks, _, _ = _unique_playable(tracks)
+    if on_progress is not None:
+        on_progress("Scanning local library...")
+    library.rescan_if_older_than(library_max_age_seconds)
+    missing = filter_not_local(tracks, library, fuzzy_threshold, on_progress=on_progress, catalog=catalog)
+
+    sent = known = failed = 0
+    first_error = ""
+    for i, track in enumerate(missing, start=1):
+        if on_progress is not None:
+            on_progress(f"Sending track {i}/{len(missing)} to the download queue: {track.title}")
+        body = {"kind": "download", "spotify_url": track.uri, "artist": track.artists, "title": track.title}
+        try:
+            status = post(api_url, api_token, body)
+            error = "" if status in (200, 409) else f"HTTP {status}"
+        except OSError as exc:
+            status, error = None, str(exc)
+        if status == 200:
+            sent += 1
+        elif status == 409:
+            known += 1
+        else:
+            failed += 1
+            logger.warning("Download job for %s - %s not sent: %s", track.artists, track.title, error)
+            first_error = first_error or error
+    logger.info(
+        "Sent %d track(s) to the cratesync download queue (%d already known, %d failed, %d already local)",
+        sent, known, failed, len(tracks) - len(missing),
+    )
+    return SendResult(sent, known, failed, first_error, skipped_local=len(tracks) - len(missing))
+
+
 def run_queue(
     spotify: SpotifyClient,
     library: LibraryIndex,
@@ -206,18 +297,7 @@ def run_queue(
     )
     tracks = collect_playlist_tracks(spotify, playlist_ids, on_progress=on_progress, catalog=catalog, snapshots=snapshots)
     total = len(tracks)
-
-    # First occurrence wins, so a track on two playlists belongs to the earlier one in queue order.
-    seen: set[str] = set()
-    unique = []
-    for track in tracks:
-        if track.uri not in seen:
-            seen.add(track.uri)
-            unique.append(track)
-    skipped_duplicate = total - len(unique)
-    # Spotify accepts these into the queue and then silently drops them, so they'd only inflate the count.
-    tracks = [t for t in unique if t.playable]
-    skipped_unplayable = len(unique) - len(tracks)
+    tracks, skipped_duplicate, skipped_unplayable = _unique_playable(tracks)
 
     skipped_local = 0
     if skip_local:

@@ -14,7 +14,7 @@ from .db import ensure_migrated
 from .download_watcher import DownloadWatcher
 from .library_index import LibraryIndex
 from .mixxx_status import default_mixxx_db_path, needs_prep, sync_prep_status, write_needs_prep_playlist
-from .queue_engine import QueueResult, run_queue
+from .queue_engine import QueueResult, SendResult, run_queue, send_missing_to_cratesync
 from .rate_limiter import RateLimiter
 from .spotify_client import SpotifyClient
 
@@ -143,6 +143,27 @@ class Application:
                 rewrite_playlist_files(self.catalog, playlist_ids, self.config.paths.m3u_output_dir)
             except OSError:
                 logger.exception("Failed to write source playlist files")
+        self.config.queue.last_selected_playlist_ids = list(playlist_ids)
+        self.save_config()
+        return result
+
+    def send_missing_to_download_queue(self, playlist_ids: list[str], on_progress=None) -> SendResult:
+        """One cratesync download job per selected track not in the local library; no playback."""
+        if on_progress is not None:
+            on_progress("Checking your playlists for changes...")
+        playlists = self.spotify.list_user_playlists()
+        self.catalog.sync_playlists(playlists)
+        result = send_missing_to_cratesync(
+            self.spotify,
+            self.library_index,
+            playlist_ids,
+            fuzzy_threshold=self.config.matching.fuzzy_threshold,
+            api_url=self.config.cratesync.api_url,
+            api_token=self.config.cratesync.api_token,
+            on_progress=on_progress,
+            catalog=self.catalog,
+            snapshots={p["id"]: p.get("snapshot_id") for p in playlists},
+        )
         self.config.queue.last_selected_playlist_ids = list(playlist_ids)
         self.save_config()
         return result

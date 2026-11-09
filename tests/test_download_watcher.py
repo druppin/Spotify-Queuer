@@ -253,8 +253,14 @@ def _tagging_watcher(tmp_path):
         catalog=catalog,
         stable_seconds=0,
         on_new_file=filed.append,
+        worker_tag_wait_seconds=0,
     )
     return watcher, watch_dir, filed
+
+
+def _wait_for_reports(watcher):
+    for timer in watcher._pending_reports:
+        timer.join(timeout=5)
 
 
 def _download(watch_dir, name, fixture="sample.mp3"):
@@ -285,6 +291,7 @@ def test_download_matching_nothing_stays_untagged_and_is_reported(tmp_path, capl
     song = _download(watch_dir, "Other Song - Someone Else.mp3")
 
     watcher.rescan_now()
+    _wait_for_reports(watcher)
 
     assert read_id(song) is None
     assert "not tagged with SPOTIFY_ID: Other Song - Someone Else.mp3" in caplog.text
@@ -330,6 +337,7 @@ def test_second_download_of_one_queued_track_is_reported_not_tagged(tmp_path, ca
     second = _download(watch_dir, "Song A - Artist 1 (1).mp3")
 
     watcher.rescan_now()
+    _wait_for_reports(watcher)
 
     assert read_id(first) == TRACK_ID
     assert read_id(second) is None
@@ -356,4 +364,19 @@ def test_download_without_ripper_tags_yet_is_tagged_once_they_land(tmp_path):
     watcher.rescan_now()
 
     assert read_id(song) == TRACK_ID
+    watcher._seen.close()
+
+
+def test_download_tagged_by_cratesync_worker_within_the_wait_is_not_reported(tmp_path, caplog):
+    from spotify_queuer.ids import write_id
+
+    watcher, watch_dir, _ = _tagging_watcher(tmp_path)
+    watcher.worker_tag_wait_seconds = 0.5
+    song = _download(watch_dir, "Other Song - Someone Else.mp3")
+
+    watcher.rescan_now()
+    write_id(song, "0pwObEOHolQZSldJ2q1wpy")  # the worker's tag lands before the wait is up
+    _wait_for_reports(watcher)
+
+    assert "not tagged with SPOTIFY_ID" not in caplog.text
     watcher._seen.close()
