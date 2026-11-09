@@ -93,3 +93,11 @@ def test_match_index_agrees_with_brute_force_scoring():
             assert best is expected_best
             if expected_best is not None:
                 assert abs(result.score - expected_score) < 1e-9
+
+
+def test_exact_title_with_strangers_artist_is_not_a_match():
+    # 85 (title) + 2.5 (weak fuzzy artist) = 87.5 used to pass the 87 threshold.
+    result = matching.score_match("Latch", "Disclosure", "Latch", "Someone Else")
+    assert result.score >= 87 and not result.is_match  # would have passed before
+    assert matching.best_match("Latch", "Someone Else", [type("T", (), {"title": "Latch", "artists": "Disclosure"})()]) == (None, None)
+    assert matching.score_match("Latch", "Disclosure feat. Sam Smith", "Latch", "Disclosure").is_match

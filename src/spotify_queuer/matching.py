@@ -18,6 +18,8 @@ _WHITESPACE_RE = re.compile(r"\s+")
 DEFAULT_THRESHOLD = 87
 TITLE_WEIGHT = 0.85
 ARTIST_WEIGHT = 0.15
+# A fuzzy-only artist score is ratio * 0.5, so 40 means names at least 80% alike.
+MIN_FUZZY_ARTIST = 40
 
 
 def normalize_text(text: str) -> str:
@@ -76,11 +78,22 @@ def score_match(
     artists_b: str | list[str],
     threshold: int = DEFAULT_THRESHOLD,
 ) -> MatchResult:
-    """Score a candidate pairing; combined = 85% title + 15% artist overlap."""
+    """Score a candidate pairing; combined = 85% title + 15% artist overlap.
+
+    A match also needs one artist in common (exactly, or names at least 80% alike):
+    an exact title alone scores 85+ and used to pass with a stranger's artist.
+    Same rule as cratesync common/matching.py @ cc9bc6d.
+    """
+    names_a, names_b = split_artists(artists_a), split_artists(artists_b)
     t_score = title_similarity(title_a, title_b)
-    a_score = artist_overlap_score(split_artists(artists_a), split_artists(artists_b))
+    a_score = artist_overlap_score(names_a, names_b)
     combined = TITLE_WEIGHT * t_score + ARTIST_WEIGHT * a_score
-    return MatchResult(score=combined, title_score=t_score, artist_score=a_score, is_match=combined >= threshold)
+    return MatchResult(score=combined, title_score=t_score, artist_score=a_score,
+                       is_match=_artist_ok(names_a, names_b, a_score) and combined >= threshold)
+
+
+def _artist_ok(names_a: list[str], names_b: list[str], a_score: float) -> bool:
+    return bool(set(names_a) & set(names_b)) or a_score >= MIN_FUZZY_ARTIST
 
 
 def _min_title_score(threshold: float) -> float:
@@ -147,7 +160,8 @@ class MatchIndex:
         for _, t_score, index in sorted(hits, key=lambda hit: hit[2]):
             a_score = artist_overlap_score(query_artists, self._artist_lists[index])
             combined = TITLE_WEIGHT * t_score + ARTIST_WEIGHT * a_score
-            if combined >= threshold and (best_result is None or combined > best_result.score):
+            if (combined >= threshold and _artist_ok(query_artists, self._artist_lists[index], a_score)
+                    and (best_result is None or combined > best_result.score)):
                 best_owner = self._owners[index]
                 best_result = MatchResult(score=combined, title_score=t_score, artist_score=a_score, is_match=True)
         if best_result is None:
